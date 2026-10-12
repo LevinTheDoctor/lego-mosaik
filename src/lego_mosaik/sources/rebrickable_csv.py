@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from lego_mosaik.config import SourceConfig
 from lego_mosaik.domain.errors import CatalogError
 from lego_mosaik.domain.models import LegoColor, LongAxis, PartCatalog, PartKind, PartType
 from lego_mosaik.domain.palette import SPECIAL_COLOR_IDS
@@ -53,10 +52,19 @@ class RebrickableCsvSource:
     """Lädt den ``PartCatalog`` aus lokalen CSV-Dateien und cacht ihn im Speicher.
 
     Erfüllt das Protocol ``PartCatalogSource`` (strukturell, ohne Vererbung).
+    Die Klasse kennt die Konfiguration nicht, sondern bekommt nur die Pfade
+    (Dependency Injection). Verdrahtet wird in ``main.py``.
+
+    Args:
+        data_dir: Ordner mit ``colors.csv.gz``, ``parts.csv.gz`` und ``elements.csv.gz``.
+        geometry_file: Pfad zu ``teil_geometrie.csv`` (Whitelist der Teile).
+        color_mapping_file: Pfad zu ``farb_zuordnung.csv`` (optional, darf fehlen).
     """
 
-    def __init__(self, config: SourceConfig) -> None:
-        self._config = config
+    def __init__(self, *, data_dir: Path, geometry_file: Path, color_mapping_file: Path) -> None:
+        self._data_dir = data_dir
+        self._geometry_file = geometry_file
+        self._color_mapping_file = color_mapping_file
         self._catalog: PartCatalog | None = None
         # Lock: Im FastAPI-Threadpool könnten zwei Anfragen gleichzeitig zum ersten
         # Mal laden. "with self._lock" lässt immer nur einen Thread hinein.
@@ -80,9 +88,9 @@ class RebrickableCsvSource:
 
     def _parse(self) -> PartCatalog:
         """Liest alle Dateien und baut daraus den Katalog."""
-        data_dir = self._config.data_dir
-        geometry = read_geometry(self._config.geometry_file)
-        color_mapping = read_color_mapping(self._config.color_mapping_file)
+        data_dir = self._data_dir
+        geometry = read_geometry(self._geometry_file)
+        color_mapping = read_color_mapping(self._color_mapping_file)
         colors = read_colors(data_dir / COLORS_FILE, color_mapping)
         names = read_part_names(data_dir / PARTS_FILE, geometry.keys())
         part_types = {

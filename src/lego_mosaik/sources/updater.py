@@ -9,13 +9,13 @@ eine kaputte CSV, und die alte Datei bleibt nutzbar.
 import gzip
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 lazy import httpx
 
-from lego_mosaik.config import SourceConfig
 from lego_mosaik.domain.errors import DownloadError
 
 logger = logging.getLogger(__name__)
@@ -83,13 +83,33 @@ class CatalogUpdater:
     """Lädt die Rebrickable-Dateien herunter, wenn nötig.
 
     Args:
-        config: Quelle, Zielordner, Höchstalter, Timeout und User-Agent.
+        data_dir: Zielordner der Dateien.
+        base_url: URL-Präfix, an das der Dateiname angehängt wird.
+        file_names: Herunterzuladende Dateien, z. B. ``("colors.csv.gz", …)``.
+        max_age_days: Ab diesem Alter gilt eine Datei als veraltet.
+        timeout_seconds: Timeout pro HTTP-Anfrage.
+        user_agent: Eigener User-Agent, damit Rebrickable den Client erkennt.
         transport: Optionaler httpx-Transport. Tests übergeben ``httpx.MockTransport``,
             damit kein echter Netzwerkzugriff stattfindet (Dependency Injection).
     """
 
-    def __init__(self, config: SourceConfig, transport: httpx.BaseTransport | None = None) -> None:
-        self._config = config
+    def __init__(
+        self,
+        *,
+        data_dir: Path,
+        base_url: str,
+        file_names: Sequence[str],
+        max_age_days: int,
+        timeout_seconds: float,
+        user_agent: str,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self._data_dir = data_dir
+        self._base_url = base_url
+        self._file_names = tuple(file_names)
+        self._max_age_days = max_age_days
+        self._timeout_seconds = timeout_seconds
+        self._user_agent = user_agent
         self._transport = transport
 
     def needs_update(self, path: Path) -> bool:
@@ -97,7 +117,7 @@ class CatalogUpdater:
         if not path.exists():
             return True
         age_seconds = time.time() - path.stat().st_mtime  # st_mtime = letzte Änderung
-        return age_seconds > self._config.max_age_days * SECONDS_PER_DAY
+        return age_seconds > self._max_age_days * SECONDS_PER_DAY
 
     def update(self, *, force: bool = False) -> UpdateReport:
         """Prüft alle Dateien und lädt veraltete oder fehlende herunter.
@@ -105,20 +125,20 @@ class CatalogUpdater:
         Args:
             force: Alle Dateien unabhängig vom Alter neu laden.
         """
-        self._config.data_dir.mkdir(parents=True, exist_ok=True)
+        self._data_dir.mkdir(parents=True, exist_ok=True)
         pending = [
-            name for name in self._config.files if force or self.needs_update(self._path(name))
+            name for name in self._file_names if force or self.needs_update(self._path(name))
         ]
-        results = {name: self._up_to_date(name) for name in self._config.files}
+        results = {name: self._up_to_date(name) for name in self._file_names}
         if pending:
             # "with" schließt den Client am Ende sicher, auch bei Ausnahmen (Context Manager)
             with self._create_client() as client:
                 for name in pending:
                     results[name] = self._download(client, name)
-        return UpdateReport(files=tuple(results[name] for name in self._config.files))
+        return UpdateReport(files=tuple(results[name] for name in self._file_names))
 
     def _path(self, file_name: str) -> Path:
-        return self._config.data_dir / file_name
+        return self._data_dir / file_name
 
     def _up_to_date(self, file_name: str) -> FileUpdate:
         return FileUpdate(file_name, FileStatus.UP_TO_DATE, "Datei ist aktuell.", usable=True)
@@ -126,8 +146,8 @@ class CatalogUpdater:
     def _create_client(self) -> httpx.Client:
         """Erzeugt den HTTP-Client mit Timeout und eigenem User-Agent."""
         return httpx.Client(
-            timeout=self._config.timeout_seconds,
-            headers={"User-Agent": self._config.user_agent},
+            timeout=self._timeout_seconds,
+            headers={"User-Agent": self._user_agent},
             follow_redirects=True,
             transport=self._transport,
         )
@@ -136,7 +156,7 @@ class CatalogUpdater:
         """Lädt eine Datei atomar herunter. Fehler werden zu einem ``FAILED``-Status."""
         target = self._path(file_name)
         temp = target.with_name(target.name + TEMP_SUFFIX)
-        url = self._config.base_url + file_name
+        url = self._base_url + file_name
         logger.info("Lade %s herunter …", url)
         try:
             _stream_to_file(client, url, temp)

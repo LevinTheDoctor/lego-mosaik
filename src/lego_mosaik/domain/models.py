@@ -44,6 +44,29 @@ class LongAxis(StrEnum):
     Z = "z"
 
 
+class FitMode(StrEnum):
+    """Wie das Bild auf das Seitenverhältnis des Mosaiks gebracht wird."""
+
+    CROP = "crop"  # mittig zuschneiden
+    PAD = "pad"  # vollständig einpassen und mit Randfarbe auffüllen
+
+
+class ColorDistance(StrEnum):
+    """Formel für den Farbabstand im Lab-Raum."""
+
+    CIE76 = "cie76"  # euklidischer Abstand, schnell
+    CIEDE2000 = "ciede2000"  # wahrnehmungsnäher, langsamer
+
+
+class Resampling(StrEnum):
+    """Verfahren zum Verkleinern des Bilds (Namen wie in ``PIL.Image.Resampling``)."""
+
+    BOX = "box"  # mittelt Flächen, gut für starkes Verkleinern
+    BILINEAR = "bilinear"
+    LANCZOS = "lanczos"
+    NEAREST = "nearest"
+
+
 @dataclass(frozen=True, slots=True)
 class LegoColor:
     """Eine echte LEGO-Farbe.

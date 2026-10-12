@@ -6,7 +6,6 @@ import pytest
 
 from lego_mosaik.config import (
     AppConfig,
-    FitMode,
     MosaicOverrides,
     apply_overrides,
     parse_fit_mode,
@@ -14,7 +13,7 @@ from lego_mosaik.config import (
     validate_config,
 )
 from lego_mosaik.domain.errors import ConfigError
-from lego_mosaik.domain.models import PartKind
+from lego_mosaik.domain.models import FitMode, PartKind
 
 
 def test_overrides_change_only_given_values(app_config: AppConfig) -> None:

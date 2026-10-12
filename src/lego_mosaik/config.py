@@ -7,11 +7,10 @@ einzige Stelle, an der Eingaben aus CLI und API geprüft und angewendet werden.
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from pathlib import Path
 
 from lego_mosaik.domain.errors import ConfigError
-from lego_mosaik.domain.models import PartKind
+from lego_mosaik.domain.models import ColorDistance, FitMode, PartKind, Resampling
 
 # Grenzen für die Mosaikgröße in Noppen
 MIN_STUDS = 8
@@ -21,29 +20,6 @@ BAYER_SIZES = (2, 4, 8)
 # Gültiger Bereich für TCP-Ports
 MIN_PORT = 1
 MAX_PORT = 65535
-
-
-class FitMode(StrEnum):
-    """Wie das Bild auf das Seitenverhältnis des Mosaiks gebracht wird."""
-
-    CROP = "crop"  # mittig zuschneiden
-    PAD = "pad"  # vollständig einpassen und mit Randfarbe auffüllen
-
-
-class ColorDistance(StrEnum):
-    """Formel für den Farbabstand im Lab-Raum."""
-
-    CIE76 = "cie76"  # euklidischer Abstand, schnell
-    CIEDE2000 = "ciede2000"  # wahrnehmungsnäher, langsamer
-
-
-class Resampling(StrEnum):
-    """Verfahren zum Verkleinern des Bilds (Namen wie in ``PIL.Image.Resampling``)."""
-
-    BOX = "box"  # mittelt Flächen, gut für starkes Verkleinern
-    BILINEAR = "bilinear"
-    LANCZOS = "lanczos"
-    NEAREST = "nearest"
 
 
 # Deutsche Bezeichnungen für die CLI und API → interne Enum-Werte
