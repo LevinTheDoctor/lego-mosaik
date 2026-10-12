@@ -1,0 +1,51 @@
+[project]
+name = "lego-mosaik"
+version = "0.1.0"
+description = "Lokaler Service, der aus einem Bild ein baubares LEGO-Mosaik mit echten Teilen erzeugt"
+readme = "README.md"
+authors = [
+    { name = "Levin Rüßmann", email = "Levin13c@gmail.com" }
+]
+requires-python = ">=3.15"
+dependencies = [
+    "fastapi>=0.143.0",
+    "httpx>=0.28.1",
+    "numpy>=2.5.4",
+    "pillow>=12.3.0",
+    "pydantic>=2.14.1",
+    "python-multipart>=0.0.32",
+    "scikit-image>=0.26.0",
+    "typer>=0.27.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+lego-mosaik = "lego_mosaik.main:run"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+target-version = "py315"
+line-length = 100
+# Markdown (z. B. die Prompt-Datei) enthält Beispielcode, der nicht formatiert werden soll
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "RUF"]
+
+[tool.mypy]
+python_version = "3.15"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
