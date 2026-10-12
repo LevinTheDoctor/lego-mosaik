@@ -29,6 +29,7 @@ from lego_mosaik.config import (
 )
 from lego_mosaik.domain.errors import ConfigError
 from lego_mosaik.domain.layout import (
+    BOND_PART_STUDS,
     LayoutSize,
     apply_frame,
     complete_size,
@@ -82,6 +83,11 @@ TIMESTAMP_FORMAT = "%Y-%m-%d_%H%M%S"
 # Erlaubte Zeichen im Ordnernamen; alles andere wird zu "_" (Schutz vor seltsamen Dateinamen)
 UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 DEFAULT_TITLE = "mosaik"
+MAX_BOND_ATTEMPTS = 8  # so viele Versätze probiert die Verbindungslage höchstens
+# str.maketrans: Tabelle Zeichen → Ersatz für str.translate
+UMLAUTS = str.maketrans(
+    {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}
+)
 
 type StepCallback = Callable[[str], None]
 
@@ -94,6 +100,7 @@ class PipelineComponents:
         tiler: Zerlegt das Bild.
         frame_tiler: Zerlegt den Rahmen (eigene Teilarten, z. B. nur Tiles).
         support_tiler: Zerlegt die Plates unter einem erhöhten Rahmen und unter dem Relief.
+        bond_tiler: Zerlegt die Verbindungslage über großen Platten (lange Plates erlaubt).
         shaper: Wählt Formteile (Stil des Bilds).
     """
 
@@ -103,6 +110,7 @@ class PipelineComponents:
     tiler: TilingStrategy
     frame_tiler: TilingStrategy
     support_tiler: TilingStrategy
+    bond_tiler: TilingStrategy
     shaper: ShapeRefiner
     writers: tuple[OutputWriter, ...]
 
@@ -310,7 +318,11 @@ class MosaicPipeline:
         with timer.step("Zerlegung in Teile"):
             layers = _tile_layers(components, grid, palette, catalog, run_config, levels, shaped)
             substrate, connectors = _substrate_layers(materials, size, run_config)
+            bond = _bond_layer(components.bond_tiler, materials, size, catalog, run_config)
+            if bond:  # alles über der Verbindungslage liegt eine Plate höher
+                layers = layers.raised(PLATE_HEIGHT_LDU)
         stats = _stats(size, layers, substrate, connectors, timer.durations)
+        stats["verbindungsteile"] = len(bond)
         mosaic = Mosaic(
             title=title,
             width=size.width,
@@ -323,6 +335,7 @@ class MosaicPipeline:
             relief=layers.relief,
             substrate=substrate,
             connectors=connectors,
+            bond=bond,
             element_ids=catalog.element_ids,
             metadata={"konfiguration": config_to_dict(run_config), "statistik": stats},
         )
@@ -362,10 +375,11 @@ class _Materials:
     substrate: tuple[PartType, LegoColor] | None
     connector: tuple[PartType, LegoColor] | None
     relief_color: LegoColor | None  # Farbe der Stützlagen unter erhöhten Bildteilen
+    bond_color: LegoColor | None  # Farbe der Verbindungslage über großen Platten
 
     @property
     def ground_color(self) -> LegoColor | None:
-        """Was in den Lücken der Formteile auf Höhe 0 zu sehen ist (der Unterbau)."""
+        """Was in den Lücken der Formteile auf Höhe 0 zu sehen ist (der Unterbau, sonst None)."""
         return self.substrate[1] if self.substrate else None
 
     @classmethod
@@ -386,12 +400,19 @@ class _Materials:
         if pad_color is None:
             raise ConfigError(f"Die Randfarbe {config.mosaic.pad_color_id} ist unbekannt.")
         substrate, connector = _substrate_materials(catalog, config)
+        bond_color = None
+        if config.layout.substrate is Substrate.PLATES:  # wie der Unterbau, in Plates
+            bond_color = require_single_stud_color(
+                catalog, substrate_color_id(config.layout), (PartKind.PLATE,), "Farbe des Unterbaus"
+            )
         relief_color = None
         if config.relief.mode is not ReliefMode.NONE:
             relief_color = require_single_stud_color(
                 catalog, relief_color_id(config), (PartKind.PLATE,), "Farbe der Relief-Stützlagen"
             )
-        return cls(frame_color, corner_color, pad_color, substrate, connector, relief_color)
+        return cls(
+            frame_color, corner_color, pad_color, substrate, connector, relief_color, bond_color
+        )
 
 
 def _substrate_materials(
@@ -439,6 +460,14 @@ class _Layers:
     frame: tuple[Placement, ...]
     supports: tuple[Placement, ...]
     relief: tuple[Placement, ...] = ()
+
+    def raised(self, ldu: int) -> _Layers:
+        """Alle Lagen um ``ldu`` angehoben (z. B. über eine Verbindungslage)."""
+
+        def lift(placements: tuple[Placement, ...]) -> tuple[Placement, ...]:
+            return tuple(replace(p, bottom_ldu=p.bottom_ldu + ldu) for p in placements)
+
+        return _Layers(lift(self.image), lift(self.frame), lift(self.supports), lift(self.relief))
 
 
 def _tile_layers(
@@ -557,13 +586,18 @@ def _shape_sections(
 ) -> ShapeResult:
     """Formwahl pro Bauabschnitt (wie die Zerlegung): Kein Formteil ragt in einen anderen."""
     shaper = components.shaper
-    ground = materials.ground_color or materials.pad_color
-    raised = materials.relief_color or ground
     to_lab = components.color_space.to_lab
-    ground_lab, raised_lab = (
-        to_lab(np.array([c.rgb], dtype=np.float64))[0] for c in (ground, raised)
-    )
-    background = np.where((levels > 0)[..., None], raised_lab, ground_lab)
+
+    def lab(color: LegoColor | None) -> FloatImage:
+        """Lab-Wert einer Farbe; ohne Farbe NaN = kein Untergrund (nur mit Unterlage)."""
+        if color is None:
+            return np.full(3, np.nan)
+        result: FloatImage = to_lab(np.array([color.rgb], dtype=np.float64))[0]
+        return result
+
+    ground = materials.bond_color or materials.ground_color
+    raised = materials.relief_color or ground
+    background = np.where((levels > 0)[..., None], lab(raised), lab(ground))
     palette_lab = to_lab(np.array([c.rgb for c in palette], dtype=np.float64))
     masked = np.where(image_area, grid, EMPTY_CELL).astype(np.intp)
     height, width = grid.shape
@@ -639,6 +673,55 @@ def _supports(
         for level in range(config.frame.raise_plates)
         for placement in layer
     )
+
+
+def _bond_layer(
+    tiler: TilingStrategy,
+    materials: _Materials,
+    size: LayoutSize,
+    catalog: PartCatalog,
+    config: AppConfig,
+) -> tuple[Placement, ...]:
+    """Verbindungslage über mehreren großen Platten: Plates „auf Lücke“ über allen Nähten.
+
+    Wie beim Rahmen-Unterbau: Die Lage wird in Abschnitte der Plattengröße zerlegt, die
+    gegen die Nähte versetzt sind (``running_bond_offset``). Weil kein Teil eine
+    Abschnittsgrenze überquert, liegt jede Naht mitten unter Plates. Mit Plates 16 × 16
+    klappt das sofort; sonst werden weitere Versätze probiert, bis jede Naht in jeder
+    Zeile und Spalte überbrückt ist.
+    """
+    color = materials.bond_color
+    if color is None or size.plates_wide * size.plates_high < 2:
+        return ()
+    seam = config.layout.plate_studs
+    longest = max(
+        (p.length_studs for p in catalog.parts_in_color(color.id, (PartKind.PLATE,))),
+        default=1,
+    )
+    first = running_bond_offset(seam, min(longest, BOND_PART_STUDS))
+    # Mit Unterbau ist die Größe immer ein Vielfaches der Platte: die Lage deckt alles ab
+    layer = np.zeros((size.height, size.width), dtype=np.intp)  # überall Farbe 0
+    attempts = [first, *(o for o in range(1, seam) if o != first)][:MAX_BOND_ATTEMPTS]
+    for offset in attempts:
+        bond = _tile_sections(tiler, layer, (color,), catalog, seam, offset=offset)
+        if _bridges_all_seams(bond, seam, size):
+            return bond
+    logger.warning("Die Verbindungslage überbrückt nicht jede Naht; bitte Plates 16 × 16 nutzen.")
+    return bond
+
+
+def _bridges_all_seams(bond: Sequence[Placement], seam: int, size: LayoutSize) -> bool:
+    """True, wenn an jeder Naht in jeder Zeile und Spalte eine Plate beide Seiten bedeckt."""
+    owner = np.full((size.height, size.width), -1)
+    for index, placement in enumerate(bond):
+        owner[
+            placement.row : placement.row + placement.rows_spanned,
+            placement.col : placement.col + placement.cols_spanned,
+        ] = index
+    cols = range(seam, size.width, seam)
+    rows = range(seam, size.height, seam)
+    across_cols = all((owner[:, col - 1] == owner[:, col]).all() for col in cols)
+    return across_cols and all((owner[row - 1, :] == owner[row, :]).all() for row in rows)
 
 
 def _substrate_layers(
@@ -767,6 +850,9 @@ def _write_outputs(
 
 
 def safe_name(title: str) -> str:
-    """Macht aus einem Titel einen sicheren Ordnernamen ("Katze & Hund" → "Katze_Hund")."""
-    cleaned = UNSAFE_NAME_CHARS.sub("_", title).strip("_")
+    """Macht aus einem Titel einen sicheren Ordnernamen ("Katze & Hund" → "Katze_Hund").
+
+    Umlaute werden umschrieben („Über“ → „Ueber“), damit der Name lesbar bleibt.
+    """
+    cleaned = UNSAFE_NAME_CHARS.sub("_", title.translate(UMLAUTS)).strip("_")
     return cleaned or DEFAULT_TITLE

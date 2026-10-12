@@ -166,7 +166,8 @@ def test_auto_update_without_network_and_files_fails(
 def test_safe_name() -> None:
     assert safe_name("Katze & Hund") == "Katze_Hund"
     assert safe_name("../../etc") == "etc"
-    assert safe_name("äöü") == "mosaik"
+    assert safe_name("Sonne über dem Meer") == "Sonne_ueber_dem_Meer"
+    assert safe_name("😀") == "mosaik"
 
 
 def test_no_part_crosses_a_section(pipeline_config: AppConfig, image_file: Path) -> None:
@@ -250,3 +251,21 @@ def test_shaped_parts_in_ldraw_and_parts_list(
     assert "98138.dat" in ldr
     parts_list = (result.target_dir / "teileliste.csv").read_text(encoding="utf-8")
     assert "98138" in parts_list
+
+
+def test_large_plates_are_bonded_across_every_seam(
+    pipeline_config: AppConfig, image_file: Path
+) -> None:
+    overrides = MosaicOverrides(substrate=Substrate.PLATES, plates_wide=2, plates_high=2)
+    mosaic = make_pipeline(pipeline_config).preview(image_file, overrides)
+    assert len(mosaic.substrate) == 4 and mosaic.bond
+    owner = {cell: index for index, part in enumerate(mosaic.bond) for cell in part.cells()}
+    assert len(owner) == mosaic.width * mosaic.height  # die Lage deckt alles ab
+    seam = 16
+    for line in range(mosaic.height):
+        # senkrechte Naht: links und rechts davon liegt dieselbe Plate
+        assert owner[line, seam - 1] == owner[line, seam], f"Zeile {line}"
+        assert owner[seam - 1, line] == owner[seam, line], f"Spalte {line}"
+    assert all(p.bottom_ldu >= 8 for p in mosaic.placements + mosaic.frame)
+    steps = [step.kind for step in assembly_steps(mosaic, section_studs=16, rows_per_step=4)]
+    assert steps[:2] == [StepKind.SUBSTRATE, StepKind.BOND]

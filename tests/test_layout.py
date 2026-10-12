@@ -47,8 +47,8 @@ def test_complete_size_keeps_aspect_ratio_of_image_area() -> None:
 
 
 def test_check_size_limits() -> None:
-    with pytest.raises(ConfigError, match="höchstens 256 Noppen pro Seite"):
-        check_size(300, 32, 0)
+    with pytest.raises(ConfigError, match="höchstens 384 Noppen pro Seite"):
+        check_size(400, 32, 0)
     with pytest.raises(ConfigError, match="mindestens 8"):
         check_size(4, 32, 0)
     with pytest.raises(ConfigError, match="Rahmen ist zu breit"):

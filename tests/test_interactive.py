@@ -14,11 +14,12 @@ from lego_mosaik.interfaces.display import UPPER_HALF_BLOCK, mosaic_preview
 runner = CliRunner()
 
 # Menüpunkte (siehe InteractiveSession._actions)
-LOAD, SIZE, FRAME, STYLE, SETTINGS, PREVIEW, CREATE, PALETTE, FORMATS, QUIT = (
+LOAD, SIZE, FRAME, STYLE, NAME, SETTINGS, PREVIEW, CREATE, PALETTE, FORMATS, QUIT = (
     "1",
     "2",
     "3",
     "6",
+    "8",
     "9",
     "10",
     "11",
@@ -157,3 +158,12 @@ def test_style_and_relief_group(cli: typer.Typer, image_file: Path) -> None:
     assert "Übernommen" in output
     assert "punkte" in output and "motiv" in output
     assert UPPER_HALF_BLOCK in output
+
+
+def test_name_can_be_changed(
+    cli: typer.Typer, image_file: Path, pipeline_config: AppConfig
+) -> None:
+    output = _run(cli, LOAD, str(image_file), NAME, "Mein Bild", "", "", CREATE, QUIT)
+    assert "Name: Mein Bild" in output  # im Menükopf
+    folders = [path.name for path in pipeline_config.output_dir.iterdir()]
+    assert len(folders) == 1 and folders[0].endswith("_Mein_Bild")

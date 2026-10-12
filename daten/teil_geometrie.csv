@@ -1,39 +1,50 @@
-part_num,kind,width_studs,length_studs,ldraw_file,height_ldu,ldraw_long_axis,bricklink_id,shape
-3024,plate,1,1,3024.dat,8,x,3024,square
-3023,plate,1,2,3023.dat,8,x,3023,square
-3623,plate,1,3,3623.dat,8,x,3623,square
-3710,plate,1,4,3710.dat,8,x,3710,square
-3666,plate,1,6,3666.dat,8,x,3666,square
-3460,plate,1,8,3460.dat,8,x,3460,square
-3022,plate,2,2,3022.dat,8,x,3022,square
-3021,plate,2,3,3021.dat,8,x,3021,square
-3020,plate,2,4,3020.dat,8,x,3020,square
-3795,plate,2,6,3795.dat,8,x,3795,square
-3034,plate,2,8,3034.dat,8,x,3034,square
-3070b,tile,1,1,3070b.dat,8,x,3070,square
-3069b,tile,1,2,3069b.dat,8,x,3069,square
-63864,tile,1,3,63864.dat,8,x,63864,square
-2431,tile,1,4,2431.dat,8,x,2431,square
-6636,tile,1,6,6636.dat,8,x,6636,square
-4162,tile,1,8,4162.dat,8,x,4162,square
-3068b,tile,2,2,3068b.dat,8,x,3068,square
-3005,brick,1,1,3005.dat,24,x,3005,square
-3004,brick,1,2,3004.dat,24,x,3004,square
-3622,brick,1,3,3622.dat,24,x,3622,square
-3010,brick,1,4,3010.dat,24,x,3010,square
-3009,brick,1,6,3009.dat,24,x,3009,square
-3008,brick,1,8,3008.dat,24,x,3008,square
-3003,brick,2,2,3003.dat,24,x,3003,square
-3002,brick,2,3,3002.dat,24,x,3002,square
-3001,brick,2,4,3001.dat,24,x,3001,square
-3867,baseplate,16,16,3867.dat,4,x,3867,square
-3811,baseplate,32,32,3811.dat,4,x,3811,square
-4186,baseplate,48,48,4186.dat,4,x,4186,square
-65803,panel,16,16,65803.dat,32,x,65803,square
-2780,connector,1,2,2780.dat,12,z,2780,square
-98138,tile,1,1,98138.dat,8,x,98138,round
-6141,plate,1,1,6141.dat,8,x,4073,round
-25269,tile,1,1,25269.dat,8,x,25269,quarter
-24246,tile,1,1,24246.dat,8,x,24246,half
-35787,tile,2,2,35787.dat,8,x,35787,triangle
-26601,plate,2,2,26601.dat,8,x,26601,cut_corner
+part_num,kind,width_studs,length_studs,ldraw_file,height_ldu,ldraw_long_axis,bricklink_id,shape,outline
+3024,plate,1,1,3024.dat,8,x,3024,square,
+3023,plate,1,2,3023.dat,8,x,3023,square,
+3623,plate,1,3,3623.dat,8,x,3623,square,
+3710,plate,1,4,3710.dat,8,x,3710,square,
+3666,plate,1,6,3666.dat,8,x,3666,square,
+3460,plate,1,8,3460.dat,8,x,3460,square,
+3022,plate,2,2,3022.dat,8,x,3022,square,
+3021,plate,2,3,3021.dat,8,x,3021,square,
+3020,plate,2,4,3020.dat,8,x,3020,square,
+3795,plate,2,6,3795.dat,8,x,3795,square,
+3034,plate,2,8,3034.dat,8,x,3034,square,
+3070b,tile,1,1,3070b.dat,8,x,3070,square,
+3069b,tile,1,2,3069b.dat,8,x,3069,square,
+63864,tile,1,3,63864.dat,8,x,63864,square,
+2431,tile,1,4,2431.dat,8,x,2431,square,
+6636,tile,1,6,6636.dat,8,x,6636,square,
+4162,tile,1,8,4162.dat,8,x,4162,square,
+3068b,tile,2,2,3068b.dat,8,x,3068,square,
+3005,brick,1,1,3005.dat,24,x,3005,square,
+3004,brick,1,2,3004.dat,24,x,3004,square,
+3622,brick,1,3,3622.dat,24,x,3622,square,
+3010,brick,1,4,3010.dat,24,x,3010,square,
+3009,brick,1,6,3009.dat,24,x,3009,square,
+3008,brick,1,8,3008.dat,24,x,3008,square,
+3003,brick,2,2,3003.dat,24,x,3003,square,
+3002,brick,2,3,3002.dat,24,x,3002,square,
+3001,brick,2,4,3001.dat,24,x,3001,square,
+3867,baseplate,16,16,3867.dat,4,x,3867,square,
+3811,baseplate,32,32,3811.dat,4,x,3811,square,
+4186,baseplate,48,48,4186.dat,4,x,4186,square,
+65803,panel,16,16,65803.dat,32,x,65803,square,
+2780,connector,1,2,2780.dat,12,z,2780,square,
+98138,tile,1,1,98138.dat,8,x,98138,round,
+6141,plate,1,1,6141.dat,8,x,4073,round,
+25269,tile,1,1,25269.dat,8,x,25269,quarter,
+24246,tile,1,1,24246.dat,8,x,24246,half,
+35787,tile,2,2,35787.dat,8,x,35787,triangle,0 0;1.85 0;1.85 0.15;0.15 1.85;0 1.85
+26601,plate,2,2,26601.dat,8,x,26601,cut_corner,0 0;1 0;2 1;2 2;0 2
+24299,plate,2,2,24299.dat,8,x,24299,wedge,0 0;1 0;1.925 1.85;1.925 2;0 2
+24307,plate,2,2,24307.dat,8,x,24307,wedge,1 0;2 0;2 2;0.075 2;0.075 1.85
+43722,plate,2,3,43722.dat,8,z,43722,wedge,1 0;2 0;2 3;0 3
+43723,plate,2,3,43723.dat,8,z,43723,wedge,0 0;1 0;2 3;0 3
+41769,plate,2,4,41769.dat,8,z,41769,wedge,1 0;2 0;2 4;0 4
+41770,plate,2,4,41770.dat,8,z,41770,wedge,0 0;1 0;2 4;0 4
+51739,plate,2,4,51739.dat,8,x,51739,wedge,1 0;3 0;3.925 1.85;3.925 2;0.075 2;0.075 1.85
+4282,plate,2,16,4282.dat,8,x,4282,square,
+3027,plate,6,16,3027.dat,8,x,3027,square,
+92438,plate,8,16,92438.dat,8,x,92438,square,
+91405,plate,16,16,91405.dat,8,x,91405,square,

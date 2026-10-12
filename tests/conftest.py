@@ -45,11 +45,13 @@ from lego_mosaik.config import (
 from lego_mosaik.domain.models import (
     ColorCategory,
     LegoColor,
+    LongAxis,
     PartCatalog,
     PartKind,
     PartShape,
     PartType,
 )
+from lego_mosaik.domain.shapes import parse_outline
 from lego_mosaik.main import build_catalog_source, build_components, build_updater
 from lego_mosaik.pipeline import MosaicPipeline
 from lego_mosaik.registry import DITHERERS
@@ -89,12 +91,32 @@ PART_ROWS: tuple[tuple[str, str, PartKind, int, int, int], ...] = (
     ("2780", "Technic Pin with Friction Ridges", PartKind.CONNECTOR, 1, 2, 12),
 )
 
-# Formteile: (part_num, name, kind, Kantenlänge, Umriss)
-SHAPED_PART_ROWS: tuple[tuple[str, str, PartKind, int, PartShape], ...] = (
-    ("98138", "Tile Round 1 x 1", PartKind.TILE, 1, PartShape.ROUND),
-    ("6141", "Plate Round 1 x 1", PartKind.PLATE, 1, PartShape.ROUND),
-    ("25269", "Tile Round 1 x 1 Quarter", PartKind.TILE, 1, PartShape.QUARTER),
-    ("35787", "Tile 45° Cut 2 x 2 (Triangle)", PartKind.TILE, 2, PartShape.TRIANGLE),
+# Formteile wie in daten/teil_geometrie.csv:
+# (part_num, name, kind, Breite, Länge, Achse der langen Seite, Art, Umriss)
+SHAPED_PART_ROWS: tuple[tuple[str, str, PartKind, int, int, LongAxis, PartShape, str], ...] = (
+    ("98138", "Tile Round 1 x 1", PartKind.TILE, 1, 1, LongAxis.X, PartShape.ROUND, ""),
+    ("6141", "Plate Round 1 x 1", PartKind.PLATE, 1, 1, LongAxis.X, PartShape.ROUND, ""),
+    ("25269", "Tile Round 1 x 1 Quarter", PartKind.TILE, 1, 1, LongAxis.X, PartShape.QUARTER, ""),
+    (
+        "35787",
+        "Tile 45° Cut 2 x 2 (Triangle)",
+        PartKind.TILE,
+        2,
+        2,
+        LongAxis.X,
+        PartShape.TRIANGLE,
+        "0 0;1.85 0;1.85 0.15;0.15 1.85;0 1.85",
+    ),
+    (
+        "43722",
+        "Wedge Plate 3 x 2 Right",
+        PartKind.PLATE,
+        2,
+        3,
+        LongAxis.Z,
+        PartShape.WEDGE,
+        "1 0;2 0;2 3;0 3",
+    ),
 )
 
 # Abweichende BrickLink-Teilenummern (wie in daten/teil_geometrie.csv)
@@ -130,6 +152,8 @@ AVAILABLE: tuple[tuple[str, int], ...] = (
     ("25269", 15),
     ("35787", 4),
     ("35787", 15),
+    ("43722", 4),
+    ("43722", 15),
 )
 
 
@@ -169,14 +193,16 @@ def make_catalog() -> PartCatalog:
             part_num,
             name,
             kind,
-            size,
-            size,
+            width,
+            length,
             f"{part_num}.dat",
             8,
+            ldraw_long_axis=axis,
             bricklink_id=BRICKLINK_IDS.get(part_num),
             shape=shape,
+            outline=parse_outline(outline) if outline else (),
         )
-        for part_num, name, kind, size, shape in SHAPED_PART_ROWS
+        for part_num, name, kind, width, length, axis, shape, outline in SHAPED_PART_ROWS
     }
     element_ids = {combo: _element_id(index) for index, combo in enumerate(AVAILABLE)}
     return PartCatalog(colors, part_types, frozenset(AVAILABLE), element_ids)
@@ -242,15 +268,28 @@ def write_geometry(path: Path) -> None:
         "ldraw_file",
         "height_ldu",
         "bricklink_id",
+        "ldraw_long_axis",
         "shape",
+        "outline",
     )
-    rows = [
-        (num, kind.value, w, length, f"{num}.dat", h, BRICKLINK_IDS.get(num, ""), "")
+    rows: list[tuple[object, ...]] = [
+        (num, kind.value, w, length, f"{num}.dat", h, BRICKLINK_IDS.get(num, ""), "x", "", "")
         for num, _, kind, w, length, h in PART_ROWS
     ]
     rows += [
-        (num, kind.value, n, n, f"{num}.dat", 8, BRICKLINK_IDS.get(num, ""), shape.value)
-        for num, _, kind, n, shape in SHAPED_PART_ROWS
+        (
+            num,
+            kind.value,
+            w,
+            length,
+            f"{num}.dat",
+            8,
+            BRICKLINK_IDS.get(num, ""),
+            axis.value,
+            shape.value,
+            outline,
+        )
+        for num, _, kind, w, length, axis, shape, outline in SHAPED_PART_ROWS
     ]
     write_csv(path, header, rows, compressed=False)
 

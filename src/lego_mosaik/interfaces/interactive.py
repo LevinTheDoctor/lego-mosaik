@@ -28,6 +28,7 @@ from lego_mosaik.config import (
     frame_part_kinds,
     label_of,
     parse_overrides,
+    run_title,
     substrate_color_id,
 )
 from lego_mosaik.domain.errors import LegoMosaicError
@@ -103,13 +104,14 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
         (
             _Field(
                 "substrate",
-                "Unterbau: art (LEGO-Art-Paneele mit Pins), grundplatte oder ohne",
+                "Unterbau: art (Paneele mit Pins), platten (große Platten, verbunden), "
+                "grundplatte (lose) oder ohne",
                 str,
                 lambda c, i: label_of(SUBSTRATE_LABELS, c.layout.substrate),
             ),
             _Field(
                 "plate_studs",
-                "Plattengröße in Noppen (Art-Paneel 16, Grundplatte 16/32/48)",
+                "Plattengröße in Noppen (Art-Paneel 16; platten/grundplatte 16, 32 oder 48)",
                 int,
                 lambda c, i: c.layout.plate_studs,
             ),
@@ -266,8 +268,14 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
         ),
     ),
     (
-        "Ausgaben",
+        "Name und Ausgaben",
         (
+            _Field(
+                "title",
+                "Name des Mosaiks auf dem Titelblatt („-“ = wie die Bilddatei)",
+                str,
+                lambda c, i: i.title or "wie die Bilddatei",
+            ),
             _Field(
                 "outputs",
                 "Ausgaben (kommagetrennt, z. B. preview_png,ldraw)",
@@ -371,6 +379,8 @@ class InteractiveSession:
     def _print_menu(self, actions: dict[str, tuple[str, Callable[[], object]]]) -> None:
         image = "–" if self.image is None else f"{self.image.name} ({self._image_size()})"
         self.console.print(f"\n[bold]Bild:[/bold] {escape(image)}")
+        if self.image is not None:
+            self.console.print(f"[bold]Name:[/bold] {escape(self.title(self.image))}")
         for key, (label, _) in actions.items():
             self.console.print(f"  [cyan]{key:>2}[/cyan]  {label}")
         self.console.print("  [cyan] 0[/cyan]  Beenden")
@@ -475,7 +485,7 @@ class InteractiveSession:
             mosaic = self.pipeline.preview(
                 image,
                 parse_overrides(self.inputs),
-                title=image.stem,
+                title=self.title(image),
                 on_step=lambda label: status.update(label),
             )
         self.console.print(mosaic_preview(mosaic, self.console.width))
@@ -493,7 +503,7 @@ class InteractiveSession:
             result = self.pipeline.run(
                 image,
                 parse_overrides(self.inputs),
-                title=image.stem,
+                title=self.title(image),
                 on_step=lambda label: status.update(label),
             )
         print_summary(self.console, result)
@@ -505,6 +515,10 @@ class InteractiveSession:
     def show_palette(self) -> None:
         """Palette für die aktuell gewählten Teilarten und Farbkategorien."""
         print_palette(self.console, self.pipeline.palette(parse_overrides(self.inputs)))
+
+    def title(self, image: Path) -> str:
+        """Name des Mosaiks: eingegeben oder der Name der Bilddatei."""
+        return run_title(self.inputs, image.stem)
 
     def _require_image(self) -> Path | None:
         if self.image is None:

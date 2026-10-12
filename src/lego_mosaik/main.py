@@ -32,6 +32,7 @@ from lego_mosaik.config import (
     frame_part_kinds,
     validate_config,
 )
+from lego_mosaik.domain.layout import BOND_PART_STUDS
 from lego_mosaik.domain.models import (
     ColorCategory,
     ColorDistance,
@@ -60,8 +61,8 @@ lazy from lego_mosaik.tiling.protocol import TilingStrategy
 
 CONFIG = AppConfig(
     layout=LayoutConfig(
-        substrate=Substrate.ART_PANEL,  # ART_PANEL (verbunden), BASEPLATE oder NONE
-        plate_studs=16,  # Art-Paneel 16; Grundplatte 16, 32 oder 48 Noppen
+        substrate=Substrate.ART_PANEL,  # ART_PANEL (Pins), PLATES (große Platten), BASEPLATE, NONE
+        plate_studs=16,  # Art-Paneel 16; große Platten und Grundplatten 16, 32 oder 48 Noppen
         plates_wide=3,  # Platten nebeneinander
         plates_high=3,  # Platten untereinander → 48 × 48 Noppen
         width_studs=None,  # freie Größe in Noppen statt Platten (None = aus den Platten)
@@ -99,7 +100,7 @@ CONFIG = AppConfig(
         spread=32.0,  # nur "ordered": Stärke in RGB-Stufen
     ),
     shapes=ShapeConfig(
-        style="quadrat",  # quadrat, formen (Rundungen/Schrägen an Kanten), punkte, noppen
+        style="formen",  # formen (Rundungen, Wedges an Kanten), quadrat, punkte, noppen
         subsample=6,  # „formen“: Teilpixel pro Noppe und Richtung
         min_gain=0.2,  # „formen“: Formteil nur bei mindestens 20 % weniger Fehler …
         min_improvement=3.0,  # … und mindestens ΔE 3 Verbesserung pro Teilpixel
@@ -125,7 +126,7 @@ CONFIG = AppConfig(
         section_studs=16,  # Bauabschnitte 16 × 16 wie bei LEGO Art
         view_elevation_deg=60.0,  # Kamera: Höhenwinkel der 3D-Ansichten
         view_azimuth_deg=0.0,  # Kamera: 0 = gerade von vorne (Zeilen bleiben abzählbar)
-        step_render_height_px=820,  # Größe der Schrittansicht
+        step_render_height_px=900,  # höchstens so hoch ist eine Schrittansicht
     ),
     source=SourceConfig(data_dir=Path("daten/rebrickable"), max_age_days=7, auto_update=True),
     output_dir=Path("ausgabe"),
@@ -161,13 +162,18 @@ def build_updater(
     )
 
 
-def build_tiler(config: AppConfig, part_kinds: tuple[PartKind, ...]) -> TilingStrategy:
+def build_tiler(
+    config: AppConfig, part_kinds: tuple[PartKind, ...], max_part_length: int | None = None
+) -> TilingStrategy:
     """Zerlegung laut Konfiguration, aber mit eigenen Teilarten (z. B. für den Rahmen).
 
     Die Registry-Fabriken lesen die Teilarten aus der Palette; eine Kopie der
     Konfiguration mit anderen Teilarten liefert deshalb dieselbe Strategie für andere Teile.
+    ``max_part_length`` erlaubt längere Teile, z. B. Plates 16 × 16 in der Verbindungslage.
     """
     adjusted = replace(config, palette=replace(config.palette, part_kinds=part_kinds))
+    if max_part_length is not None:
+        adjusted = replace(adjusted, tiling=replace(config.tiling, max_part_length=max_part_length))
     return resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(adjusted)
 
 
@@ -185,6 +191,7 @@ def build_components(config: AppConfig) -> PipelineComponents:
         tiler=resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(config),
         frame_tiler=build_tiler(config, frame_part_kinds(config)),
         support_tiler=build_tiler(config, (PartKind.PLATE,)),  # Stützlagen brauchen Noppen
+        bond_tiler=build_tiler(config, (PartKind.PLATE,), max_part_length=BOND_PART_STUDS),
         shaper=resolve(SHAPERS, config.shapes.style, "Stil")(config),
         writers=tuple(
             resolve(OUTPUT_WRITERS, name, "Ausgabeformat")(config) for name in config.outputs

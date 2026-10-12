@@ -1,9 +1,13 @@
-"""Umrisse der Formteile von oben (Viertelkreis, Halbkreis, rund, Dreieck, Cut Corner).
+"""Umrisse der Formteile von oben (Rundungen, Dreiecke, Cut Corner, Wedge Plates).
 
 Koordinaten in Noppen, x = Spalte nach rechts, y = Zeile nach unten, Ursprung oben
-links in der Box des Teils (1 × 1 oder 2 × 2). Die Grundlage (``turns = 0``) entspricht
-genau der Lage in der LDraw-Datei; gemessen mit der LDraw-Bibliothek von Bricklink
-Studio (siehe ``scripts/ldraw_achsen_pruefen.py``):
+links in der Box des Teils. Die Grundlage (``turns = 0``) entspricht genau der Lage in
+der LDraw-Datei (``PartType.box`` gibt deren Breite und Höhe an):
+
+- Eckige Umrisse (Dreieck, Cut Corner, Wedge Plates) stehen als Polygon in
+  ``daten/teil_geometrie.csv`` (Spalte ``outline``), gemessen mit der LDraw-Bibliothek
+  von Bricklink Studio (``scripts/ldraw_achsen_pruefen.py``).
+- Rundungen werden hier berechnet:
 
 =========== ======= ==================================================================
 Umriss      Teil    Lage bei ``turns = 0``
@@ -11,12 +15,11 @@ Umriss      Teil    Lage bei ``turns = 0``
 ROUND       98138   Kreis in der Mitte
 QUARTER     25269   rechter Winkel unten links, Bogen von oben links nach unten rechts
 HALF        24246   gerade Kante unten, Rundung oben
-TRIANGLE    35787   rechter Winkel oben links, Schenkel 1,85 Noppen
-CUT_CORNER  26601   2 × 2, Ecke oben rechts schräg abgeschnitten
 =========== ======= ==================================================================
 
-Eine Vierteldrehung im Uhrzeigersinn bildet (x, y) auf (n − y, x) ab (n = Kantenlänge).
-Alle Umrisse sind konvex; das hält Punkttest und Zuschnitt einfach.
+Eine Vierteldrehung im Uhrzeigersinn bildet (x, y) in einer Box der Höhe h auf
+(h − y, x) ab; Breite und Höhe der Box tauschen dabei. Alle Umrisse sind konvex; das
+hält Punkttest und Zuschnitt einfach.
 """
 
 import math
@@ -25,18 +28,13 @@ from collections.abc import Mapping, Sequence
 lazy import numpy as np
 lazy import numpy.typing as npt
 
-from lego_mosaik.domain.models import PartShape
-
-type Point = tuple[float, float]
-type Outline = tuple[Point, ...]
+from lego_mosaik.domain.models import Outline, PartShape, PartType, Point
 
 ARC_POINTS = 13  # Punkte auf einem Viertelkreis (inklusive beider Enden)
 STUD_RADIUS = 0.3  # Radius einer Noppe in Noppen (6 von 20 LDU)
 SAMPLES_PER_SUBPIXEL = 4  # Abtastpunkte pro Richtung und Teilpixel (für Kantenglättung)
 TURNS = 4  # vier Vierteldrehungen ergeben wieder die Ausgangslage
 EPSILON = 1e-9
-TRIANGLE_LEG = 1.85  # 37 LDU: Die Schenkel sind etwas kürzer als 2 Noppen
-TRIANGLE_TIP = 0.15  # 3 LDU: abgestumpfte Spitzen
 
 
 def _arc(center: Point, radius: float, start_deg: float, end_deg: float) -> list[Point]:
@@ -50,54 +48,54 @@ def _arc(center: Point, radius: float, start_deg: float, end_deg: float) -> list
     return points
 
 
-# Umrisse bei turns = 0, jeweils mit ihrer Kantenlänge in Noppen
-_BASE: Mapping[PartShape, tuple[int, Outline]] = {
-    PartShape.SQUARE: (1, ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))),
-    PartShape.ROUND: (1, tuple(_arc((0.5, 0.5), 0.5, 0.0, 360.0)[:-1])),
-    PartShape.QUARTER: (1, ((0.0, 1.0), *_arc((0.0, 1.0), 1.0, 0.0, 90.0))),
-    PartShape.HALF: (1, (*_arc((0.5, 0.5), 0.5, -90.0, 90.0), (1.0, 1.0), (0.0, 1.0))),
-    PartShape.TRIANGLE: (
-        2,
-        (
-            (0.0, 0.0),
-            (TRIANGLE_LEG, 0.0),
-            (TRIANGLE_LEG, TRIANGLE_TIP),
-            (TRIANGLE_TIP, TRIANGLE_LEG),
-            (0.0, TRIANGLE_LEG),
-        ),
-    ),
-    PartShape.CUT_CORNER: (2, ((0.0, 0.0), (1.0, 0.0), (2.0, 1.0), (2.0, 2.0), (0.0, 2.0))),
+# Berechnete Umrisse (alle 1 × 1) bei turns = 0
+_CURVES: Mapping[PartShape, Outline] = {
+    PartShape.ROUND: tuple(_arc((0.5, 0.5), 0.5, 0.0, 360.0)[:-1]),
+    PartShape.QUARTER: ((0.0, 1.0), *_arc((0.0, 1.0), 1.0, 0.0, 90.0)),
+    PartShape.HALF: (*_arc((0.5, 0.5), 0.5, -90.0, 90.0), (1.0, 1.0), (0.0, 1.0)),
 }
-
+CURVED_SHAPES = frozenset(_CURVES)
 # Umrisse, die bei einer Drehung gleich bleiben, brauchen nur eine Ausrichtung
 SYMMETRIC_SHAPES = frozenset({PartShape.SQUARE, PartShape.ROUND})
 
 
-def shape_size(shape: PartShape) -> int:
-    """Kantenlänge der Box eines Umrisses in Noppen (1 oder 2)."""
-    return _BASE[shape][0]
+def base_outline(part: PartType) -> Outline:
+    """Umriss bei ``turns = 0``: berechnete Rundung, Polygon aus der Tabelle oder Rechteck."""
+    if part.shape in _CURVES:
+        return _CURVES[part.shape]
+    if part.outline:
+        return part.outline
+    cols, rows = part.box
+    return ((0.0, 0.0), (float(cols), 0.0), (float(cols), float(rows)), (0.0, float(rows)))
 
 
-def shape_turns(shape: PartShape) -> range:
+def part_turns(part: PartType) -> range:
     """Sinnvolle Drehungen: symmetrische Umrisse nur 0, alle anderen 0 bis 3."""
-    return range(1) if shape in SYMMETRIC_SHAPES else range(TURNS)
+    return range(1) if part.shape in SYMMETRIC_SHAPES else range(TURNS)
 
 
-def outline(shape: PartShape, turns: int = 0) -> Outline:
+def box(part: PartType, turns: int = 0) -> tuple[int, int]:
+    """(Zeilen, Spalten) der Box nach ``turns`` Vierteldrehungen."""
+    cols, rows = part.box
+    return (cols, rows) if turns % 2 else (rows, cols)
+
+
+def outline(part: PartType, turns: int = 0) -> Outline:
     """Umriss in der Box des Teils nach ``turns`` Vierteldrehungen im Uhrzeigersinn."""
-    size, points = _BASE[shape]
+    points, (cols, rows) = base_outline(part), part.box
     for _ in range(turns % TURNS):
-        points = tuple((size - y, x) for x, y in points)
+        points = tuple((rows - y, x) for x, y in points)
+        cols, rows = rows, cols  # die alte Höhe ist die neue Breite
     return points
 
 
-def cell_outline(shape: PartShape, turns: int, d_row: int, d_col: int) -> Outline | None:
+def cell_outline(part: PartType, turns: int, d_row: int, d_col: int) -> Outline | None:
     """Teil des Umrisses, der in der Zelle (``d_row``, ``d_col``) der Box liegt.
 
     Die Koordinaten sind relativ zur Zelle (0 bis 1). ``None``, wenn das Teil die Zelle
     nicht berührt. Zuschnitt nach Sutherland-Hodgman an den vier Zellkanten.
     """
-    points = [(x - d_col, y - d_row) for x, y in outline(shape, turns)]
+    points = [(x - d_col, y - d_row) for x, y in outline(part, turns)]
     # Jede Kante der Zelle als (Achse, Grenze, innen ist größer?)
     for axis, limit, keep_greater in (
         (0, 0.0, True),
@@ -149,21 +147,24 @@ def polygon_signed_area(points: Sequence[Point]) -> float:
     return total / 2
 
 
-def coverage(shape: PartShape, turns: int, subsample: int) -> npt.NDArray[np.float64]:
+def coverage(part: PartType, turns: int, subsample: int) -> npt.NDArray[np.float64]:
     """Anteil jedes Teilpixels, den das Teil bedeckt (0 bis 1).
 
-    Die Box (n × n Noppen) wird in ``n·subsample`` × ``n·subsample`` Teilpixel geteilt;
-    jedes Teilpixel wird mit 4 × 4 Punkten abgetastet. So entstehen weiche Kanten, und
-    die Formwahl bewertet schräge und runde Konturen fair.
+    Die Box (Zeilen × Spalten Noppen) wird in Teilpixel zu ``subsample`` × ``subsample``
+    pro Noppe geteilt; jedes Teilpixel wird mit 4 × 4 Punkten abgetastet. So entstehen
+    weiche Kanten, und die Formwahl bewertet schräge und runde Konturen fair.
     """
-    size = shape_size(shape)
-    pixels, samples = size * subsample, SAMPLES_PER_SUBPIXEL
+    rows, cols = box(part, turns)
+    samples = SAMPLES_PER_SUBPIXEL
+    step = subsample * samples
     # Mittelpunkte aller Abtastpunkte in Noppen-Koordinaten
-    axis = (np.arange(pixels * samples) + 0.5) / (subsample * samples)
-    xs, ys = np.meshgrid(axis, axis)  # xs: Spalte, ys: Zeile
-    inside = inside_convex(outline(shape, turns), xs, ys)
+    xs, ys = np.meshgrid(
+        (np.arange(cols * step) + 0.5) / step, (np.arange(rows * step) + 0.5) / step
+    )
+    inside = inside_convex(outline(part, turns), xs, ys)
     # reshape + mean: je samples × samples Abtastpunkte zu einem Teilpixel mitteln
-    return inside.reshape(pixels, samples, pixels, samples).mean(axis=(1, 3))
+    shape = (rows * subsample, samples, cols * subsample, samples)
+    return inside.reshape(shape).mean(axis=(1, 3))
 
 
 def inside_convex(
@@ -180,13 +181,13 @@ def inside_convex(
     return result
 
 
-def stud_visible(shape: PartShape, turns: int, d_row: int, d_col: int) -> bool:
+def stud_visible(part: PartType, turns: int, d_row: int, d_col: int) -> bool:
     """True, wenn auf der Zelle eine ganze Noppe des Teils Platz hat.
 
-    Plates wie die Cut-Corner-Wedge haben nur dort Noppen, wo der Umriss die Noppe
+    Plates wie die Wedge Plates haben nur dort Noppen, wo der Umriss die Noppe
     vollständig enthält (Abstand zur Mitte der Zelle mindestens ``STUD_RADIUS``).
     """
-    points = outline(shape, turns)
+    points = outline(part, turns)
     center = (d_col + 0.5, d_row + 0.5)
     if not inside_convex(points, np.array([center[0]]), np.array([center[1]]))[0]:
         return False
@@ -200,3 +201,17 @@ def _distance_to_line(point: Point, start: Point, end: Point) -> float:
     """Abstand eines Punkts von der Geraden durch ``start`` und ``end``."""
     dx, dy = end[0] - start[0], end[1] - start[1]
     return abs(dx * (point[1] - start[1]) - dy * (point[0] - start[0])) / math.hypot(dx, dy)
+
+
+def parse_outline(text: str) -> Outline:
+    """Liest ``"0 0; 1 0; 2 1"`` (Punkte in Noppen) in ein Polygon.
+
+    Raises:
+        ValueError: Bei weniger als drei Punkten oder falschem Format.
+    """
+    points = tuple(
+        (float(x), float(y)) for x, y in (pair.split() for pair in text.split(";") if pair.strip())
+    )
+    if len(points) < 3:
+        raise ValueError("Ein Umriss braucht mindestens drei Punkte")
+    return points

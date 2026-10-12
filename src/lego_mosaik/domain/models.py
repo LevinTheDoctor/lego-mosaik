@@ -25,6 +25,12 @@ type FloatImage = npt.NDArray[np.float64]
 type RgbTuple = tuple[int, int, int]
 """Farbe als (Rot, Grün, Blau), je 0–255."""
 
+type Point = tuple[float, float]
+"""Punkt in Noppen: (x = Spalte nach rechts, y = Zeile nach unten)."""
+
+type Outline = tuple[Point, ...]
+"""Polygon aus Punkten, z. B. der Umriss eines Formteils von oben."""
+
 # Höhe einer Plate in LDraw-Einheiten (LDU). Eine Noppe ist 20 LDU breit.
 PLATE_HEIGHT_LDU = 8
 
@@ -62,6 +68,7 @@ class PartShape(StrEnum):
     HALF = "half"  # Tile 1 × 1 Half Circle
     TRIANGLE = "triangle"  # Tile 2 × 2 Triangular (45°)
     CUT_CORNER = "cut_corner"  # Wedge Plate 2 × 2 Cut Corner
+    WEDGE = "wedge"  # Wedge Plates 2 × 2, 3 × 2, 4 × 2 (links/rechts) und 2 × 4
 
 
 class ReliefMode(StrEnum):
@@ -78,13 +85,16 @@ class Substrate(StrEnum):
 
     BASEPLATE = "baseplate"  # dünne Grundplatten; mehrere liegen nur lose nebeneinander
     ART_PANEL = "art_panel"  # LEGO-Art-Paneele, an den Seiten mit Technic-Pins verbunden
+    PLATES = "plates"  # große Platten (16 × 16 bis 48 × 48), oben mit Plates auf Lücke verbunden
     NONE = "none"  # ohne Unterbau (z. B. auf eigene Platten)
 
 
-# Welche Teilart den jeweiligen Unterbau bildet (NONE hat keine)
-SUBSTRATE_PART_KINDS: Mapping[Substrate, PartKind] = {
-    Substrate.BASEPLATE: PartKind.BASEPLATE,
-    Substrate.ART_PANEL: PartKind.PANEL,
+# Welche Teilarten den jeweiligen Unterbau bilden, in Vorzugsreihenfolge (NONE hat keine).
+# „platten“: eine echte Plate (stabil, mit Unterseite) vor einer dünnen Grundplatte
+SUBSTRATE_PART_KINDS: Mapping[Substrate, tuple[PartKind, ...]] = {
+    Substrate.BASEPLATE: (PartKind.BASEPLATE,),
+    Substrate.ART_PANEL: (PartKind.PANEL,),
+    Substrate.PLATES: (PartKind.PLATE, PartKind.BASEPLATE),
 }
 
 
@@ -179,7 +189,9 @@ class PartType:
         height_ldu: Höhe in LDU (Plate/Tile 8, Brick 24).
         ldraw_long_axis: Achse der langen Seite in der LDraw-Datei.
         bricklink_id: Teilenummer bei BrickLink, falls abweichend (z. B. 3070 statt 3070b).
-        shape: Umriss von oben; Formteile sind quadratisch groß (1 × 1 oder 2 × 2).
+        shape: Art des Umrisses von oben (eckig oder Formteil).
+        outline: Umriss eines Formteils in Noppen bei ``turns = 0`` (Lage wie in der
+            LDraw-Datei); leer = Rechteck bzw. berechnete Rundung (``domain/shapes.py``).
     """
 
     part_num: str
@@ -192,6 +204,14 @@ class PartType:
     ldraw_long_axis: LongAxis = LongAxis.X
     bricklink_id: str | None = None
     shape: PartShape = PartShape.SQUARE
+    outline: Outline = ()
+
+    @property
+    def box(self) -> tuple[int, int]:
+        """(Spalten, Zeilen) der Box bei ``turns = 0``, also so wie in der LDraw-Datei."""
+        if self.ldraw_long_axis is LongAxis.X:
+            return self.length_studs, self.width_studs
+        return self.width_studs, self.length_studs
 
     @property
     def bricklink_item(self) -> str:
@@ -284,7 +304,8 @@ class Placement:
         bottom_ldu: Höhe der Unterkante über der Oberseite des Unterbaus in LDU
             (0 = direkt auf Grundplatte/Paneel; ein erhöhter Rahmen liegt höher).
         turns: Nur Formteile: Vierteldrehungen im Uhrzeigersinn (Draufsicht, 0–3)
-            gegenüber der Grundlage in ``domain/shapes.py``.
+            gegenüber der Lage in der LDraw-Datei (``domain/shapes.py``). ``rotated``
+            gilt für Formteile nicht.
     """
 
     part: PartType
@@ -303,12 +324,18 @@ class Placement:
     @property
     def cols_spanned(self) -> int:
         """Anzahl Spalten, die das Teil belegt (Ausdehnung in x-Richtung)."""
+        if self.part.is_shaped:  # Box wie in LDraw, jede Vierteldrehung tauscht die Seiten
+            cols, rows = self.part.box
+            return rows if self.turns % 2 else cols
         # Bedingter Ausdruck: "a if Bedingung else b" wählt einen von zwei Werten
         return self.part.width_studs if self.rotated else self.part.length_studs
 
     @property
     def rows_spanned(self) -> int:
         """Anzahl Zeilen, die das Teil belegt (Ausdehnung nach unten)."""
+        if self.part.is_shaped:
+            cols, rows = self.part.box
+            return cols if self.turns % 2 else rows
         return self.part.length_studs if self.rotated else self.part.width_studs
 
     def cells(self) -> Iterable[tuple[int, int]]:
@@ -325,8 +352,9 @@ class Placement:
 class Mosaic:
     """Das fertige Mosaik, aufgeteilt in Lagen in Bau-Reihenfolge.
 
-    Von unten nach oben: Unterbau (Grundplatten oder Art-Paneele) → Verbinder
-    (Technic-Pins zwischen den Paneelen) → Stützteile unter einem erhöhten Rahmen →
+    Von unten nach oben: Unterbau (Grundplatten, große Platten oder Art-Paneele) →
+    Verbinder (Technic-Pins zwischen den Paneelen) bzw. Verbindungslage aus Plates →
+    Stützteile unter einem erhöhten Rahmen →
     Rahmen → Relief-Stützlagen → Bild. Rahmen und Bild bilden zusammen die sichtbare
     Oberfläche.
 
@@ -341,6 +369,8 @@ class Mosaic:
         supports: Unsichtbare Plates unter einem erhöhten Rahmen.
         relief: Plates unter erhöhten Bildteilen (Relief wie bei Brick Sketches); sie
             werden pro Abschnitt vor dem Bild gebaut.
+        bond: Verbindungslage aus Plates auf Lücke über mehreren großen Unterbau-Platten;
+            alles andere liegt eine Plate höher.
         substrate: Grundplatten bzw. Art-Paneele unter dem Mosaik (leer = ohne Unterbau).
         connectors: Technic-Pins, die benachbarte Art-Paneele verbinden.
         element_ids: LEGO-Element-IDs der genutzten (Teilenummer, Farb-ID)-Kombinationen.
@@ -359,6 +389,7 @@ class Mosaic:
     substrate: tuple[Placement, ...] = ()
     connectors: tuple[Placement, ...] = ()
     relief: tuple[Placement, ...] = ()
+    bond: tuple[Placement, ...] = ()
     element_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -370,7 +401,7 @@ class Mosaic:
     @property
     def stacked(self) -> tuple[Placement, ...]:
         """Alles über dem Unterbau, von unten nach oben (für Draufsichten und 3D-Bilder)."""
-        return self.supports + self.relief + self.surface
+        return self.bond + self.supports + self.relief + self.surface
 
     @property
     def all_parts(self) -> tuple[Placement, ...]:

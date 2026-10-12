@@ -38,8 +38,8 @@ def test_empty_overrides_keep_config(app_config: AppConfig) -> None:
 
 
 def test_too_many_studs_rejected(app_config: AppConfig) -> None:
-    overrides = MosaicOverrides(plate_studs=48, plates_wide=6)
-    with pytest.raises(ConfigError, match="höchstens 256 Noppen pro Seite"):
+    overrides = MosaicOverrides(plate_studs=48, plates_wide=9)  # 432 Noppen
+    with pytest.raises(ConfigError, match="höchstens 384 Noppen pro Seite"):
         apply_overrides(app_config, overrides)
 
 
@@ -119,8 +119,8 @@ def test_max_colors_zero_means_unlimited(app_config: AppConfig) -> None:
 def test_custom_size_is_checked(app_config: AppConfig) -> None:
     run_config = apply_overrides(app_config, MosaicOverrides(width_studs=50))
     assert run_config.layout.custom_size and run_config.layout.height_studs is None
-    with pytest.raises(ConfigError, match="Breite muss zwischen 8 und 256"):
-        apply_overrides(app_config, MosaicOverrides(width_studs=300))
+    with pytest.raises(ConfigError, match="Breite muss zwischen 8 und 384"):
+        apply_overrides(app_config, MosaicOverrides(width_studs=400))
 
 
 def test_frame_raise_is_limited(app_config: AppConfig) -> None:

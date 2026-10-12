@@ -15,16 +15,18 @@ import logging
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
+import yaml
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
-from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides
+from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides, run_title
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
 from lego_mosaik.domain.models import LegoColor
 from lego_mosaik.pipeline import MosaicPipeline, safe_name
@@ -41,6 +43,22 @@ type PipelineFactory = Callable[[AppConfig], MosaicPipeline]
 
 
 # --- Pydantic-Modelle (Feldbeschreibungen erscheinen in /docs) -----------------------
+
+
+class ErrorModel(BaseModel):
+    fehler: str = Field(description="Deutsche Fehlermeldung")
+
+
+def _errors(*codes: int) -> dict[int | str, dict[str, Any]]:
+    """Fehlerantworten für die OpenAPI-Beschreibung einer Route (alle als ``ErrorModel``)."""
+    texts = {
+        400: "Kein lesbares Bild",
+        404: "Nicht gefunden",
+        413: "Datei zu groß",
+        422: "Ungültige Angaben",
+        500: "Verarbeitungsfehler",
+    }
+    return {code: {"model": ErrorModel, "description": texts[code]} for code in codes}
 
 
 class CatalogFileModel(BaseModel):
@@ -93,12 +111,24 @@ def create_app(config: AppConfig, pipeline_factory: PipelineFactory) -> FastAPI:
     app = FastAPI(
         title="LEGO-Mosaik-Service",
         description="Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).",
+        version=version("lego-mosaik"),
         lifespan=lifespan,
     )
     _register_error_handlers(app)
     _register_catalog_routes(app, pipeline)
     _register_mosaic_routes(app, pipeline, config)
+
+    @app.get("/openapi.yaml", include_in_schema=False)
+    def openapi_document() -> Response:
+        """Die OpenAPI-Beschreibung als YAML (dieselbe wie ``/openapi.json``)."""
+        return Response(openapi_yaml(app), media_type="application/yaml")
+
     return app
+
+
+def openapi_yaml(app: FastAPI) -> str:
+    """OpenAPI-3-Beschreibung der App als YAML, Schlüssel in der Reihenfolge von FastAPI."""
+    return yaml.safe_dump(app.openapi(), sort_keys=False, allow_unicode=True, width=100)
 
 
 async def _update_periodically(pipeline: MosaicPipeline, config: AppConfig) -> None:
@@ -158,7 +188,7 @@ def _register_catalog_routes(app: FastAPI, pipeline: MosaicPipeline) -> None:
         ]
         return HealthModel(status="ok", katalog=files)
 
-    @app.get("/farben", summary="Palette für Teilarten und Farbkategorien")
+    @app.get("/farben", summary="Palette für Teilarten und Farbkategorien", responses=_errors(422))
     def colors(
         teile: Annotated[str | None, Query(description="z. B. plate,tile")] = None,
         farbkategorien: Annotated[str | None, Query(description="z. B. solid,pearl")] = None,
@@ -202,11 +232,18 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
 
     # Normales def (kein async def): FastAPI führt es im Threadpool aus, der Server
     # bleibt während der rechenintensiven Mosaikerzeugung ansprechbar
-    @app.post("/mosaike", status_code=status.HTTP_201_CREATED, summary="Mosaik erzeugen")
+    @app.post(
+        "/mosaike",
+        status_code=status.HTTP_201_CREATED,
+        summary="Mosaik erzeugen",
+        responses=_errors(400, 413, 422, 500),
+    )
     def create_mosaic(
         request: Request,
         bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
-        unterbau: Annotated[str | None, Form(description="art, grundplatte oder ohne")] = None,
+        unterbau: Annotated[
+            str | None, Form(description="art, platten, grundplatte oder ohne")
+        ] = None,
         plattengroesse: Annotated[int | None, Form(description="16, 32 oder 48")] = None,
         format_name: Annotated[
             str | None, Form(alias="format", description="z. B. quadrat, quer, weltkarte")
@@ -235,6 +272,9 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
         farbabstand: Annotated[str | None, Form(description="cie76 oder ciede2000")] = None,
         zerlegung: Annotated[str | None, Form(description="Zerlegungsverfahren")] = None,
         ausgaben: Annotated[str | None, Form(description="z. B. preview_png,ldraw")] = None,
+        titel: Annotated[
+            str | None, Form(description="Name auf dem Titelblatt (Standard: Dateiname)")
+        ] = None,
     ) -> MosaicCreatedModel:
         data = _read_limited(bild, max_bytes)
         raw = OverrideInput(
@@ -265,22 +305,31 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
             color_distance=farbabstand,
             tiling_strategy=zerlegung,
             outputs=ausgaben,
+            title=titel,
         )
         overrides = parse_overrides(raw)
-        title = safe_name(Path(bild.filename or "mosaik").stem)
+        title = run_title(raw, safe_name(Path(bild.filename or "mosaik").stem))
         result = pipeline.run(data, overrides, title=title)
         files = _result_files(result.target_dir)
         base_url = str(request.base_url).rstrip("/")
         urls = {name: f"{base_url}/mosaike/{result.id}/dateien/{name}" for name in files}
         return MosaicCreatedModel(id=result.id, statistik=result.stats, dateien=urls)
 
-    @app.get("/mosaike/{mosaic_id}", summary="Inhalt von ergebnis.json")
+    @app.get("/mosaike/{mosaic_id}", summary="Inhalt von ergebnis.json", responses=_errors(404))
     def get_mosaic(mosaic_id: str) -> dict[str, object]:
         result_path = _mosaic_dir(config.output_dir, mosaic_id) / RESULT_FILE
         content: dict[str, object] = json.loads(result_path.read_text(encoding="utf-8"))
         return content
 
-    @app.get("/mosaike/{mosaic_id}/dateien/{file_name}", summary="Datei herunterladen")
+    @app.get(
+        "/mosaike/{mosaic_id}/dateien/{file_name}",
+        summary="Datei herunterladen",
+        response_class=FileResponse,
+        responses={
+            200: {"description": "Die Datei (PNG, PDF, LDraw, CSV, XML oder JSON)"},
+            **_errors(404),
+        },
+    )
     def download(mosaic_id: str, file_name: str) -> FileResponse:
         directory = _mosaic_dir(config.output_dir, mosaic_id)
         # Nur Namen aus ergebnis.json; der Pfad wird nie direkt aus der URL gebaut

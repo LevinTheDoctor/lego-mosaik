@@ -1,0 +1,571 @@
+openapi: 3.1.0
+info:
+  title: LEGO-Mosaik-Service
+  description: Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).
+  version: 0.1.0
+paths:
+  /gesundheit:
+    get:
+      summary: Status und Stand des Teilekatalogs
+      operationId: health_gesundheit_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthModel'
+  /farben:
+    get:
+      summary: Palette für Teilarten und Farbkategorien
+      operationId: colors_farben_get
+      parameters:
+      - name: teile
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: z. B. plate,tile
+          title: Teile
+        description: z. B. plate,tile
+      - name: farbkategorien
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: z. B. solid,pearl
+          title: Farbkategorien
+        description: z. B. solid,pearl
+      - name: exotisch
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Alle Kategorien außer Gummi
+          default: false
+          title: Exotisch
+        description: Alle Kategorien außer Gummi
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ColorModel'
+                title: Response Colors Farben Get
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /verfahren:
+    get:
+      summary: Registrierte Verfahren und Ausgaben
+      operationId: methods_verfahren_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  items:
+                    type: string
+                  type: array
+                type: object
+                title: Response Methods Verfahren Get
+  /teile/aktualisieren:
+    post:
+      summary: Rebrickable-Katalog aktualisieren
+      operationId: update_teile_aktualisieren_post
+      parameters:
+      - name: erzwingen
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Auch aktuelle Dateien neu laden
+          default: false
+          title: Erzwingen
+        description: Auch aktuelle Dateien neu laden
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UpdateFileModel'
+                title: Response Update Teile Aktualisieren Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /mosaike:
+    post:
+      summary: Mosaik erzeugen
+      operationId: create_mosaic_mosaike_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_create_mosaic_mosaike_post'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MosaicCreatedModel'
+        '400':
+          description: Kein lesbares Bild
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '413':
+          description: Datei zu groß
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '500':
+          description: Verarbeitungsfehler
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /mosaike/{mosaic_id}:
+    get:
+      summary: Inhalt von ergebnis.json
+      operationId: get_mosaic_mosaike__mosaic_id__get
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Mosaic Mosaike  Mosaic Id  Get
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /mosaike/{mosaic_id}/dateien/{file_name}:
+    get:
+      summary: Datei herunterladen
+      operationId: download_mosaike__mosaic_id__dateien__file_name__get
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      - name: file_name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: File Name
+      responses:
+        '200':
+          description: Die Datei (PNG, PDF, LDraw, CSV, XML oder JSON)
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    Body_create_mosaic_mosaike_post:
+      properties:
+        bild:
+          type: string
+          contentMediaType: application/octet-stream
+          title: Bild
+          description: Bilddatei (JPG, PNG, …)
+        unterbau:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Unterbau
+          description: art, platten, grundplatte oder ohne
+        plattengroesse:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Plattengroesse
+          description: 16, 32 oder 48
+        format:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Format
+          description: z. B. quadrat, quer, weltkarte
+        platten:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Platten
+          description: BxH, z. B. 3x3
+        breite:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Breite
+          description: Eigene Breite in Noppen
+        hoehe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Hoehe
+          description: Eigene Höhe in Noppen
+        unterbaufarbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Unterbaufarbe
+          description: Rebrickable-ID
+        rahmen:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Rahmen
+          description: Rahmenbreite in Noppen
+        rahmenfarbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Rahmenfarbe
+          description: Rebrickable-ID
+        eckenfarbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Eckenfarbe
+          description: Rebrickable-ID der Ecken
+        rahmen_teile:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rahmen Teile
+          description: z. B. tile
+        rahmen_erhoehung:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Rahmen Erhoehung
+          description: Plates unter dem Rahmen
+        modus:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Modus
+          description: zuschneiden oder einpassen
+        kontrast:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Kontrast
+          description: 1.0 = unverändert
+        saettigung:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Saettigung
+          description: 1.0 = unverändert
+        teile:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Teile
+          description: z. B. plate,tile
+        farbkategorien:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Farbkategorien
+          description: z. B. solid,pearl
+        exotische_farben:
+          type: boolean
+          title: Exotische Farben
+          description: Alle außer Gummi
+          default: false
+        max_farben:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Farben
+          description: 0 = unbegrenzt
+        stil:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stil
+          description: quadrat, formen, punkte, noppen
+        relief:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Relief
+          description: ohne, motiv, hell, dunkel
+        relief_hoehe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Relief Hoehe
+          description: 1 bis 3 Plates
+        dithering:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dithering
+          description: Dithering-Verfahren
+        staerke:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Staerke
+          description: 0.0 bis 1.0
+        farbabstand:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Farbabstand
+          description: cie76 oder ciede2000
+        zerlegung:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Zerlegung
+          description: Zerlegungsverfahren
+        ausgaben:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ausgaben
+          description: z. B. preview_png,ldraw
+        titel:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Titel
+          description: 'Name auf dem Titelblatt (Standard: Dateiname)'
+      type: object
+      required:
+      - bild
+      title: Body_create_mosaic_mosaike_post
+    CatalogFileModel:
+      properties:
+        datei:
+          type: string
+          title: Datei
+          description: Dateiname der Rebrickable-CSV
+        stand:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stand
+          description: Letzte Änderung (ISO 8601, UTC) oder null
+        veraltet:
+          type: boolean
+          title: Veraltet
+          description: True, wenn die Datei fehlt oder zu alt ist
+      type: object
+      required:
+      - datei
+      - stand
+      - veraltet
+      title: CatalogFileModel
+    ColorModel:
+      properties:
+        id:
+          type: integer
+          title: Id
+          description: Rebrickable-Farb-ID
+        name:
+          type: string
+          title: Name
+          description: Farbname (Rebrickable)
+        hex:
+          type: string
+          title: Hex
+          description: 'Farbwert als #RRGGBB'
+        kategorie:
+          type: string
+          title: Kategorie
+          description: 'Oberfläche: solid, metallic, pearl, …'
+        ldraw_code:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Ldraw Code
+          description: LDraw-Farbcode
+        bricklink_code:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Bricklink Code
+          description: BrickLink-Farbcode, falls bekannt
+        lego_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lego Name
+          description: Offizieller LEGO-Farbname, falls bekannt
+      type: object
+      required:
+      - id
+      - name
+      - hex
+      - kategorie
+      - ldraw_code
+      - bricklink_code
+      - lego_name
+      title: ColorModel
+    ErrorModel:
+      properties:
+        fehler:
+          type: string
+          title: Fehler
+          description: Deutsche Fehlermeldung
+      type: object
+      required:
+      - fehler
+      title: ErrorModel
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HealthModel:
+      properties:
+        status:
+          type: string
+          title: Status
+          description: „ok“, wenn der Server läuft
+        katalog:
+          items:
+            $ref: '#/components/schemas/CatalogFileModel'
+          type: array
+          title: Katalog
+          description: Stand der Katalogdateien
+      type: object
+      required:
+      - status
+      - katalog
+      title: HealthModel
+    MosaicCreatedModel:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: ID des Mosaiks (Name des Ausgabeordners)
+        statistik:
+          additionalProperties: true
+          type: object
+          title: Statistik
+          description: Größe, Farben, Teile, Dauer
+        dateien:
+          additionalProperties:
+            type: string
+          type: object
+          title: Dateien
+          description: Dateiname → Download-URL
+      type: object
+      required:
+      - id
+      - statistik
+      - dateien
+      title: MosaicCreatedModel
+    UpdateFileModel:
+      properties:
+        datei:
+          type: string
+          title: Datei
+          description: Dateiname
+        status:
+          type: string
+          title: Status
+          description: heruntergeladen, aktuell oder fehlgeschlagen
+        hinweis:
+          type: string
+          title: Hinweis
+          description: Erklärung, bei Fehlern der Grund
+      type: object
+      required:
+      - datei
+      - status
+      - hinweis
+      title: UpdateFileModel
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError

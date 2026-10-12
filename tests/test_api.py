@@ -5,11 +5,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import make_pipeline
 from fastapi.testclient import TestClient
 
 from lego_mosaik.config import AppConfig, MosaicOverrides, ServerConfig
-from lego_mosaik.interfaces.api import create_app
+from lego_mosaik.interfaces.api import create_app, openapi_yaml
+from lego_mosaik.main import CONFIG, build_pipeline
 
 
 @pytest.fixture
@@ -111,3 +113,20 @@ def test_create_with_format_style_and_relief(client: TestClient, image_file: Pat
     assert (stats["breite"], stats["hoehe"]) == (32, 32)
     assert stats["formteile"] == 30 * 30  # punkte: jede Bildnoppe rund
     assert stats["relief_teile"]
+
+
+def test_openapi_yaml_is_served_and_up_to_date(client: TestClient) -> None:
+    response = client.get("/openapi.yaml")
+    assert response.status_code == 200
+    document = yaml.safe_load(response.text)
+    assert document["openapi"].startswith("3.")
+    form = document["components"]["schemas"]["Body_create_mosaic_mosaike_post"]["properties"]
+    assert {"bild", "format", "stil", "relief", "titel"} <= set(form)
+    # Die eingecheckte openapi.yaml muss zur App passen (neu: scripts/openapi_exportieren.py)
+    committed = (Path(__file__).parent.parent / "openapi.yaml").read_text(encoding="utf-8")
+    assert committed == openapi_yaml(create_app(CONFIG, build_pipeline))
+
+
+def test_title_field_names_the_mosaic(client: TestClient, image_file: Path) -> None:
+    body = _upload(client, image_file, titel="Über den Wolken", ausgaben="result_json")
+    assert str(body["id"]).endswith("_Ueber_den_Wolken")

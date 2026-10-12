@@ -36,6 +36,8 @@ MIN_PORT = 1
 MAX_PORT = 65535
 # Stil ohne Formteile: nur eckige Teile wie bisher (Registry-Schlüssel in registry.SHAPERS)
 PLAIN_STYLE = "quadrat"
+# Stile, bei denen jede Noppe rund ist: Zwischen den Punkten muss ein Unterbau zu sehen sein
+DOT_STYLES = frozenset({"punkte", "noppen"})
 MAX_SUBSAMPLE = 12  # Teilpixel pro Noppe und Richtung bei der Formwahl
 
 
@@ -48,6 +50,7 @@ COLOR_DISTANCE_LABELS: Mapping[str, ColorDistance] = {
 SUBSTRATE_LABELS: Mapping[str, Substrate] = {
     "art": Substrate.ART_PANEL,
     "grundplatte": Substrate.BASEPLATE,
+    "platten": Substrate.PLATES,
     "ohne": Substrate.NONE,
 }
 RELIEF_LABELS: Mapping[str, ReliefMode] = {
@@ -59,6 +62,7 @@ RELIEF_LABELS: Mapping[str, ReliefMode] = {
 # Standardfarbe des Unterbaus, wenn keine angegeben ist (Rebrickable-IDs)
 DEFAULT_SUBSTRATE_COLOR_IDS: Mapping[Substrate, int] = {
     Substrate.BASEPLATE: 71,  # Light Bluish Gray
+    Substrate.PLATES: 71,  # Light Bluish Gray: gibt es als 16er-Plate und 32er/48er-Grundplatte
     Substrate.ART_PANEL: 0,  # Black, wie bei LEGO Art
 }
 
@@ -75,7 +79,7 @@ class LayoutConfig:
     """
 
     substrate: Substrate = Substrate.BASEPLATE
-    plate_studs: int = 32  # Grundplatte 16, 32 oder 48; Art-Paneel 16
+    plate_studs: int = 32  # Grundplatte und große Platten 16, 32 oder 48; Art-Paneel 16
     plates_wide: int = 1  # Platten nebeneinander
     plates_high: int = 1  # Platten untereinander
     width_studs: int | None = None  # freie Breite in Noppen (None = aus den Platten)
@@ -192,8 +196,8 @@ class ShapeConfig:
     ``style`` ist ein Schlüssel aus ``registry.SHAPERS``:
 
     - ``quadrat``: nur Plates und Tiles, gleiche Farben werden zusammengefasst
-    - ``formen``: an Kanten Viertelkreise, Halbkreise, Dreiecke und Cut-Corner-Wedges,
-      wo sie die Kontur genauer treffen (Bild wird dafür feiner ausgewertet)
+    - ``formen``: an Kanten Viertel- und Halbkreise, Dreiecke und Wedge Plates, wo sie
+      die Kontur genauer treffen (Bild wird dafür feiner ausgewertet)
     - ``punkte``: jede Noppe ein Tile Round 1 × 1 (Look von LEGO Art und Brick Sketches)
     - ``noppen``: jede Noppe eine Plate Round 1 × 1 („Studs“)
 
@@ -207,6 +211,7 @@ class ShapeConfig:
         PartShape.ROUND,
         PartShape.TRIANGLE,
         PartShape.CUT_CORNER,
+        PartShape.WEDGE,
     )
     subsample: int = 6  # Teilpixel pro Noppe und Richtung (nur „formen“)
     min_gain: float = 0.2  # Formteil nur, wenn der Fehler um diesen Anteil sinkt
@@ -242,19 +247,19 @@ class LdrawConfig:
 
 @dataclass(frozen=True, slots=True)
 class InstructionsConfig:
-    """Aufbau der Bauanleitung (Seitengröße entspricht A4 bei 150 dpi)."""
+    """Aufbau der Bauanleitung: Querformat wie ein LEGO-Heft (A4 quer bei 150 dpi)."""
 
     section_studs: int = 16  # Abschnittsgröße in Noppen (quadratisch)
-    page_width_px: int = 1240
-    page_height_px: int = 1754
-    margin_px: int = 60
+    page_width_px: int = 1754
+    page_height_px: int = 1240
+    margin_px: int = 50
     max_stud_px: int = 48  # größte Noppe auf der Abschnittskarte
     # Kamera der 3D-Ansichten: gerade von vorne, steil von oben (wie LEGO Art);
     # Zeilen und Spalten bleiben abzählbar. Drehung > 0 zeigt zusätzlich Seitenflächen.
     view_elevation_deg: float = 60.0
     view_azimuth_deg: float = 0.0
     supersample: int = 2  # intern größer rendern und verkleinern (glatte Kanten)
-    step_render_height_px: int = 820  # Höhe einer Schrittansicht in Pixeln
+    step_render_height_px: int = 900  # höchstens so hoch ist eine Schrittansicht in Pixeln
     # TrueType-Schriften mit Umlauten; die erste vorhandene wird genutzt.
     # Pillows eingebaute Schrift kann weder ä/ö/ü noch × und –.
     font_paths: tuple[Path, ...] = (
@@ -263,6 +268,14 @@ class InstructionsConfig:
         Path("/usr/share/fonts/TTF/DejaVuSans.ttf"),  # Arch
         Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
         Path("C:/Windows/Fonts/arial.ttf"),  # Windows
+    )
+    # Fette Schriften für Schrittnummern und Titel (wie in LEGO-Heften)
+    bold_font_paths: tuple[Path, ...] = (
+        Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),  # macOS
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),  # Debian/Ubuntu
+        Path("/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"),  # Arch
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),  # Windows
     )
 
 
@@ -531,7 +544,10 @@ def _check_layout(layout: LayoutConfig, frame_width: int) -> None:
 
 
 def _check_shapes(config: AppConfig) -> None:
-    """Formteile brauchen einen Unterbau (er ist in den Lücken zu sehen) und flache Teile."""
+    """Formteile gehen nur mit flachen Teilen; Punkte brauchen einen Unterbau dazwischen.
+
+    „formen“ geht auch ohne Unterbau: Dann liegt jedes Formteil auf einer Unterlage.
+    """
     shapes = config.shapes
     _check_range("Teilpixel der Formwahl", shapes.subsample, 2, MAX_SUBSAMPLE)
     _check_range("Mindestgewinn der Formwahl", shapes.min_gain, 0.0, 1.0)
@@ -541,10 +557,10 @@ def _check_shapes(config: AppConfig) -> None:
         raise ConfigError("Formteile: „square“ ist kein Formteil.")
     if shapes.style == PLAIN_STYLE:
         return
-    if config.layout.substrate is Substrate.NONE:
+    if shapes.style in DOT_STYLES and config.layout.substrate is Substrate.NONE:
         raise ConfigError(
-            f"Der Stil „{shapes.style}“ braucht einen Unterbau (art oder grundplatte): "
-            "In den Lücken der runden und schrägen Teile ist er zu sehen."
+            f"Der Stil „{shapes.style}“ braucht einen Unterbau (art, platten oder grundplatte): "
+            "Zwischen den runden Teilen ist er zu sehen."
         )
     if PartKind.BRICK in config.palette.part_kinds:
         raise ConfigError(
@@ -620,6 +636,14 @@ class OverrideInput:
     tiling_strategy: str | None = None
     outputs: str | None = None  # z. B. "preview_png,ldraw"
     output_dir: Path | None = None
+    # Name des Mosaiks (Titelblatt, Ordnername); kein Konfigurationswert, gilt nur für den Lauf
+    title: str | None = None
+
+
+def run_title(raw: OverrideInput, fallback: str) -> str:
+    """Name des Mosaiks: eingegeben oder ``fallback`` (meist der Name der Bilddatei)."""
+    title = (raw.title or "").strip()
+    return title or fallback
 
 
 def parse_overrides(raw: OverrideInput) -> MosaicOverrides:

@@ -40,9 +40,14 @@ SUBSTRATE_TOP_Y = PLATE_HEIGHT_LDU
 # Kommentar vor jedem Schritt (Studio ignoriert ihn, beim Lesen der Datei hilft er)
 _STEP_COMMENTS = {
     StepKind.CONNECTORS: "Verbinder (Technic-Pins)",
+    StepKind.BOND: "Verbindungslage",
     StepKind.FRAME: "Rahmen",
 }
-_SUBSTRATE_COMMENTS = {PartKind.BASEPLATE: "Grundplatten", PartKind.PANEL: "LEGO-Art-Paneele"}
+_SUBSTRATE_COMMENTS = {
+    PartKind.BASEPLATE: "Grundplatten",
+    PartKind.PANEL: "LEGO-Art-Paneele",
+    PartKind.PLATE: "Große Platten",
+}
 
 
 class LdrawWriter:

@@ -80,10 +80,13 @@ def test_custom_size_is_validated_after_snapping(app_config: AppConfig) -> None:
         apply_overrides(app_config, without)
 
 
-def test_shapes_need_a_substrate(app_config: AppConfig) -> None:
-    overrides = MosaicOverrides(style="formen", substrate=Substrate.NONE)
+def test_dots_need_a_substrate(app_config: AppConfig) -> None:
+    overrides = MosaicOverrides(style="punkte", substrate=Substrate.NONE)
     with pytest.raises(ConfigError, match="Unterbau"):
         apply_overrides(app_config, overrides)
+    # „formen“ geht auch ohne: Formteile liegen dann immer auf einer Unterlage
+    no_substrate = MosaicOverrides(style="formen", substrate=Substrate.NONE)
+    assert apply_overrides(app_config, no_substrate).shapes.style == "formen"
 
 
 def test_shapes_do_not_mix_with_bricks(app_config: AppConfig) -> None:

@@ -125,6 +125,7 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
             supersample=config.instructions.supersample,
             step_render_height=config.instructions.step_render_height_px,
             font_paths=config.instructions.font_paths,
+            bold_font_paths=config.instructions.bold_font_paths,
         )
     ),
     "result_json": lambda config: ResultJsonWriter(),

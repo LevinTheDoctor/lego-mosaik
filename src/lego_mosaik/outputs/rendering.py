@@ -83,8 +83,7 @@ def _shape_points(placement: Placement, stud_px: int, region: Region) -> list[tu
     """Umriss eines Formteils in Pixeln relativ zum Ausschnitt."""
     left, top = (placement.col - region.col) * stud_px, (placement.row - region.row) * stud_px
     return [
-        (left + x * stud_px, top + y * stud_px)
-        for x, y in outline(placement.part.shape, placement.turns)
+        (left + x * stud_px, top + y * stud_px) for x, y in outline(placement.part, placement.turns)
     ]
 
 
@@ -99,7 +98,7 @@ def _draw_shape(
     inset = round(stud_px * STUD_INSET_RATIO)
     for row, col in placement.cells():
         d_row, d_col = row - placement.row, col - placement.col
-        if stud_visible(placement.part.shape, placement.turns, d_row, d_col):
+        if stud_visible(placement.part, placement.turns, d_row, d_col):
             left, top = (col - region.col) * stud_px, (row - region.row) * stud_px
             circle = (
                 left + inset,

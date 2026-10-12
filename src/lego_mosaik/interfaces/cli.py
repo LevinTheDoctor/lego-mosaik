@@ -15,7 +15,7 @@ lazy from rich.console import Console
 lazy from rich.logging import RichHandler
 lazy from rich.table import Table
 
-from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides
+from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides, run_title
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
 from lego_mosaik.domain.models import LegoColor
 from lego_mosaik.interfaces.display import print_formats, print_palette, print_summary
@@ -127,14 +127,15 @@ def _register_create(
         unterbau: Annotated[
             str | None,
             typer.Option(
-                help="art (LEGO-Art-Paneele, mit Pins verbunden), grundplatte oder ohne.",
+                help="art (LEGO-Art-Paneele mit Pins), platten (große Platten, mit Plates "
+                "verbunden), grundplatte (lose) oder ohne.",
                 rich_help_panel=SIZE_PANEL,
             ),
         ] = None,
         plattengroesse: Annotated[
             int | None,
             typer.Option(
-                help="Plattengröße in Noppen (Art-Paneel 16; Grundplatte 16, 32, 48).",
+                help="Plattengröße in Noppen (Art-Paneel 16; platten und grundplatte 16, 32, 48).",
                 rich_help_panel=SIZE_PANEL,
             ),
         ] = None,
@@ -266,6 +267,13 @@ def _register_create(
         ziel: Annotated[
             Path | None, typer.Option(help="Ausgabeordner.", rich_help_panel=METHOD_PANEL)
         ] = None,
+        titel: Annotated[
+            str | None,
+            typer.Option(
+                help="Name des Mosaiks auf dem Titelblatt (Standard: Name der Bilddatei).",
+                rich_help_panel=METHOD_PANEL,
+            ),
+        ] = None,
     ) -> None:
         """Erzeugt ein Mosaik aus BILD (Optionen ohne Angabe kommen aus der Konfiguration)."""
         raw = OverrideInput(
@@ -297,6 +305,7 @@ def _register_create(
             tiling_strategy=zerlegung,
             outputs=ausgaben,
             output_dir=ziel,
+            title=titel,
         )
 
         def action() -> MosaicResult:
@@ -304,7 +313,10 @@ def _register_create(
             pipeline = pipeline_factory(config)
             with console.status("Starte …") as status:
                 return pipeline.run(
-                    bild, overrides, title=bild.stem, on_step=lambda label: status.update(label)
+                    bild,
+                    overrides,
+                    title=run_title(raw, bild.stem),
+                    on_step=lambda label: status.update(label),
                 )
 
         print_summary(console, _run_safely(state, console, action))

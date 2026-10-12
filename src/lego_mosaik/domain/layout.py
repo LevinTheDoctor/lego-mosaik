@@ -22,14 +22,17 @@ from lego_mosaik.domain.models import (
 
 # Grenzen für die Mosaikgröße in Noppen
 MIN_STUDS = 8  # Gesamtgröße pro Seite
-MAX_STUDS = 256
+MAX_STUDS = 384  # z. B. Weltkarte aus 48er-Platten: 8 × 5 Platten = 384 × 240
 MIN_IMAGE_STUDS = 4  # Bildfläche innerhalb des Rahmens pro Seite
 
 # Deutsche Bezeichnungen (mit passendem Artikel) für Fehlermeldungen
 _NO_SUBSTRATE_LABELS = {
     PartKind.BASEPLATE: "keine Grundplatte",
     PartKind.PANEL: "kein LEGO-Art-Paneel",
+    PartKind.PLATE: "keine Plate",
 }
+# Längste Plate in der Verbindungslage über großen Platten (Plate 16 × 16)
+BOND_PART_STUDS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,21 +212,33 @@ def check_size(width: int, height: int, frame_width: int) -> None:
 # --- Unterbau ------------------------------------------------------------------------
 
 
-def find_substrate_part(catalog: PartCatalog, kind: PartKind, studs: int) -> PartType:
-    """Sucht die quadratische Unterbau-Platte (Grundplatte oder Paneel) mit ``studs`` Noppen.
+def find_substrate_part(
+    catalog: PartCatalog, kinds: PartKind | Sequence[PartKind], studs: int
+) -> PartType:
+    """Sucht die quadratische Unterbau-Platte mit ``studs`` Noppen.
+
+    Bei mehreren Teilarten gewinnt die erste, in der es die Größe gibt (z. B. eine echte
+    Plate 16 × 16 vor der dünnen Grundplatte gleicher Größe).
 
     Raises:
         ConfigError: Wenn es keine solche Platte gibt; nennt die verfügbaren Größen.
     """
-    candidates = [part for part in catalog.part_types.values() if part.kind is kind]
-    for part in candidates:
-        if part.width_studs == part.length_studs == studs:
-            return part
-    label = _NO_SUBSTRATE_LABELS.get(kind, f"kein Teil der Art {kind.value}")
-    sizes = ", ".join(str(size) for size in sorted({p.length_studs for p in candidates}))
-    raise ConfigError(
-        f"Es gibt {label} mit {studs} × {studs} Noppen. Verfügbar: {sizes or 'keine'}."
+    kinds = (kinds,) if isinstance(kinds, PartKind) else tuple(kinds)
+    for kind in kinds:
+        for part in sorted(catalog.part_types.values(), key=lambda p: p.part_num):
+            square = part.width_studs == part.length_studs == studs
+            if part.kind is kind and square and not part.is_shaped:
+                return part
+    label = _NO_SUBSTRATE_LABELS.get(kinds[0], f"kein Teil der Art {kinds[0].value}")
+    sizes = sorted(
+        {
+            p.length_studs
+            for p in catalog.part_types.values()
+            if p.kind in kinds and p.width_studs == p.length_studs >= MIN_STUDS
+        }
     )
+    available = ", ".join(map(str, sizes)) or "keine"
+    raise ConfigError(f"Es gibt {label} mit {studs} × {studs} Noppen. Verfügbar: {available}.")
 
 
 def find_connector(catalog: PartCatalog) -> PartType:

@@ -18,13 +18,14 @@ from lego_mosaik.domain.models import (
     ColorCategory,
     LegoColor,
     LongAxis,
+    Outline,
     PartCatalog,
     PartKind,
     PartShape,
     PartType,
 )
 from lego_mosaik.domain.palette import SPECIAL_COLOR_IDS
-from lego_mosaik.domain.shapes import shape_size
+from lego_mosaik.domain.shapes import CURVED_SHAPES, parse_outline
 from lego_mosaik.sources.studio_colors import (
     StudioColor,
     StudioColorTable,
@@ -63,6 +64,7 @@ class _Geometry:
     ldraw_long_axis: LongAxis
     bricklink_id: str | None
     shape: PartShape
+    outline: Outline
 
 
 class RebrickableCsvSource:
@@ -160,6 +162,7 @@ def _to_part_type(part_num: str, name: str, row: _Geometry) -> PartType:
         ldraw_long_axis=row.ldraw_long_axis,
         bricklink_id=row.bricklink_id,
         shape=row.shape,
+        outline=row.outline,
     )
 
 
@@ -189,15 +192,21 @@ def _parse_geometry_row(row: dict[str, str]) -> tuple[str, _Geometry]:
         bricklink_id=(row.get("bricklink_id") or "").strip() or None,
         # optionale Spalte; Standard ist ein eckiges Teil
         shape=PartShape((row.get("shape") or "square").strip().lower()),
+        # optionale Spalte: Umriss als „x y; x y; …“ in Noppen (Lage wie in LDraw)
+        outline=parse_outline(row["outline"]) if (row.get("outline") or "").strip() else (),
     )
-    if geometry.shape is not PartShape.SQUARE and not (
-        width == length == shape_size(geometry.shape)
-    ):
-        raise ValueError(
-            f"Formteile {geometry.shape.value} müssen {shape_size(geometry.shape)} × "
-            f"{shape_size(geometry.shape)} Noppen groß sein"
-        )
+    _check_outline(geometry)
     return row["part_num"].strip(), geometry
+
+
+def _check_outline(geometry: _Geometry) -> None:
+    """Rundungen sind 1 × 1 und werden berechnet; eckige Formteile brauchen einen Umriss."""
+    shape = geometry.shape
+    if shape in CURVED_SHAPES and not geometry.width_studs == geometry.length_studs == 1:
+        raise ValueError(f"Formteile „{shape.value}“ müssen 1 × 1 Noppe groß sein")
+    needs_outline = shape is not PartShape.SQUARE and shape not in CURVED_SHAPES
+    if needs_outline and not geometry.outline:
+        raise ValueError(f"Formteile „{shape.value}“ brauchen einen Umriss (Spalte outline)")
 
 
 def read_color_mapping(path: Path) -> dict[int, int]:

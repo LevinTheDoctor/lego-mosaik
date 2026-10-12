@@ -80,6 +80,7 @@ class StepKind(StrEnum):
 
     SUBSTRATE = "substrate"  # Grundplatten bzw. Paneele auslegen
     CONNECTORS = "connectors"  # Paneele mit Technic-Pins verbinden
+    BOND = "bond"  # große Platten mit einer Lage Plates auf Lücke verbinden
     FRAME_SUPPORT = "frame_support"  # Plates unter einem erhöhten Rahmen
     FRAME = "frame"  # sichtbarer Rahmen
     RELIEF = "relief"  # Stützlage unter erhöhten Bildteilen eines Abschnitts
@@ -118,6 +119,8 @@ def assembly_steps(
         steps.append(BuildStep(StepKind.SUBSTRATE, mosaic.substrate))
     if mosaic.connectors:
         steps.append(BuildStep(StepKind.CONNECTORS, mosaic.connectors))
+    if mosaic.bond:
+        steps.append(BuildStep(StepKind.BOND, _by_color(mosaic.bond)))
     # groupby nach Höhe: jede Lage des Rahmen-Unterbaus wird ein eigener Schritt
     by_height = sorted(mosaic.supports, key=lambda p: p.bottom_ldu)
     for level, (_, group) in enumerate(groupby(by_height, key=lambda p: p.bottom_ldu)):
