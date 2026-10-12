@@ -27,7 +27,11 @@ lazy from lego_mosaik.dithering.nearest import NearestColorDitherer
 lazy from lego_mosaik.dithering.ordered import OrderedDitherer
 lazy from lego_mosaik.dithering.protocol import Ditherer
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
+lazy from lego_mosaik.outputs.ldraw import LdrawWriter
+lazy from lego_mosaik.outputs.parts_list_csv import PartsListCsvWriter
+lazy from lego_mosaik.outputs.preview_png import PreviewPngWriter
 lazy from lego_mosaik.outputs.protocol import OutputWriter
+lazy from lego_mosaik.outputs.result_json import ResultJsonWriter
 lazy from lego_mosaik.tiling.greedy import GreedyTiling
 lazy from lego_mosaik.tiling.protocol import TilingStrategy
 lazy from lego_mosaik.tiling.single_stud import SingleStudTiling
@@ -72,7 +76,17 @@ TILING_STRATEGIES: dict[str, TilingFactory] = {
     "greedy": lambda config: GreedyTiling(config.palette.part_kinds, config.tiling.max_part_length),
 }
 
-OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {}
+OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
+    "preview_png": lambda config: PreviewPngWriter(
+        stud_px=config.preview.stud_px, draw_part_edges=config.preview.draw_part_edges
+    ),
+    "ldraw": lambda config: LdrawWriter(
+        rows_per_step=config.ldraw.rows_per_step,
+        include_baseplate=config.ldraw.include_baseplate,
+    ),
+    "parts_list_csv": lambda config: PartsListCsvWriter(),
+    "result_json": lambda config: ResultJsonWriter(),
+}
 
 
 def resolve[T](registry: Mapping[str, T], name: str, label: str) -> T:

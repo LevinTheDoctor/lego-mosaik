@@ -17,3 +17,6 @@ wheels/
 # Heruntergeladene Rebrickable-Dumps und erzeugte Mosaike
 daten/rebrickable/
 ausgabe/
+
+# macOS-Ordnerinfos
+.DS_Store

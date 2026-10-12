@@ -221,6 +221,7 @@ class Mosaic:
         color_grid: H×W-Raster mit Indizes in ``palette``.
         palette: Die beim Dithering verwendeten Farben.
         placements: Alle platzierten Teile.
+        element_ids: LEGO-Element-IDs der genutzten (Teilenummer, Farb-ID)-Kombinationen.
         metadata: Zusatzinfos für Ausgaben (z. B. Konfiguration und Statistik als JSON-fähige
             Werte). Die Domain kennt deren Aufbau nicht, sie reicht sie nur durch.
     """
@@ -231,6 +232,7 @@ class Mosaic:
     color_grid: IndexGrid
     palette: tuple[LegoColor, ...]
     placements: tuple[Placement, ...]
+    element_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def color_at(self, row: int, col: int) -> LegoColor:
