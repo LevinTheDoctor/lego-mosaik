@@ -2,17 +2,18 @@
 
 Lokaler Service, der aus einem Bild ein **baubares LEGO-Mosaik aus echten Teilen** erzeugt:
 
-1. Das Bild wird auf eine Größe in Grundplatten gebracht (z. B. 2 × 2 Grundplatten à 32 × 32 Noppen).
+1. Das Bild wird auf eine Größe gebracht: in Platten (z. B. 3 × 3 LEGO-Art-Paneele à 16 × 16 Noppen) oder frei in Noppen.
 2. Die Farben werden per Dithering auf echte LEGO-Farben reduziert.
 3. Die Palette besteht nur aus Farben, die es wirklich als 1×1-Teil gibt (Rebrickable-Daten).
 4. Gleichfarbige Flächen werden zu möglichst wenigen, real existierenden Plates und Tiles zusammengefasst.
-5. Ausgaben entstehen:
+5. Der Unterbau hält alles zusammen wie bei LEGO Art: Paneele mit Technic-Pins verbunden, darauf ein (optional erhöhter) Rahmen.
+6. Ausgaben entstehen:
    - Vorschau
    - LDraw-Datei für Bricklink Studio
    - Teilelisten (BrickLink, Rebrickable, LEGO)
-   - Bauanleitung im LEGO-Stil als PDF, mit 3D-Renderbildern pro Bauschritt
+   - Bauanleitung im LEGO-Stil als PDF, vom Unterbau über den Rahmen bis zum fertigen Bild
 
-Bedienung über eine deutsche Kommandozeile oder eine lokale HTTP-API. Beide nutzen dieselbe Pipeline.
+Bedienung über eine deutsche Kommandozeile (auch interaktiv mit Menü) oder eine lokale HTTP-API. Alle nutzen dieselbe Pipeline.
 
 ## Setup
 
@@ -39,6 +40,7 @@ Die Pfade `daten/` und `ausgabe/` gelten relativ zum aktuellen Ordner. Der Befeh
 | Befehl | Zweck |
 | --- | --- |
 | `lego-mosaik erstellen BILD` | Mosaik erzeugen |
+| `lego-mosaik interaktiv [BILD]` | Menügeführt: Bild laden, Optionen einstellen, Vorschau im Terminal, Mosaik ausgeben |
 | `lego-mosaik teile-aktualisieren [--erzwingen]` | Rebrickable-CSV-Dateien laden |
 | `lego-mosaik farben` | Palette als Tabelle mit Farbfeld anzeigen |
 | `lego-mosaik verfahren` | Registrierte Dithering-, Zerlegungs- und Ausgabe-Namen |
@@ -46,19 +48,31 @@ Die Pfade `daten/` und `ausgabe/` gelten relativ zum aktuellen Ordner. Der Befeh
 
 Hilfe gibt es mit `-h`, `--hilfe` oder `--help`, auch für jeden Befehl (`lego-mosaik erstellen --hilfe`). `--debug` vor dem Befehl zeigt ausführliche Logs und Tracebacks.
 
-Wichtige Optionen von `erstellen`:
+Optionen von `erstellen` (in der Hilfe nach Gruppen sortiert):
 
 | Option | Bedeutung |
 | --- | --- |
-| `--grundplatte 16\|32\|48` | Größe einer Grundplatte in Noppen |
-| `--platten 2x2` | Anzahl Grundplatten (Breite × Höhe) |
-| `--rahmen 1` / `--rahmenfarbe 0` | Rahmenbreite in Noppen (0 = ohne) und Farbe (Rebrickable-ID) |
-| `--mit-grundplatte` / `--ohne-grundplatte` | Grundplatten in LDraw-Datei und Teilelisten |
+| **Größe und Unterbau** | |
+| `--unterbau art\|grundplatte\|ohne` | LEGO-Art-Paneele (mit Pins verbunden), lose Grundplatten oder nichts |
+| `--plattengroesse 16\|32\|48` | Größe einer Platte in Noppen (Art-Paneel: 16) |
+| `--platten 3x3` | Anzahl Platten (Breite × Höhe) |
+| `--breite 50` / `--hoehe 70` | Eigene Größe in Noppen statt Platten; nur eine Seite → die andere aus dem Seitenverhältnis |
+| `--unterbaufarbe 0` | Farbe der Paneele bzw. Grundplatten (Rebrickable-ID) |
+| **Rahmen** | |
+| `--rahmen 1` / `--rahmenfarbe 0` | Rahmenbreite in Noppen (0 = ohne) und Farbe |
+| `--eckenfarbe 15` | Eigene Farbe für die vier Ecken |
+| `--rahmen-teile tile` | Teilarten des Rahmens (glatt mit `tile`) |
+| `--rahmen-erhoehung 1` | Rahmen um so viele Plates höher als das Bild (0 = bündig) |
+| **Bild und Farben** | |
 | `--modus zuschneiden\|einpassen` | Bild mittig zuschneiden oder ganz einpassen |
-| `--teile plate,tile` | Erlaubte Teilarten (`brick` nur allein) |
+| `--kontrast 1.2` / `--saettigung 1.1` | Bild vorher anpassen (1.0 = unverändert) |
+| `--teile plate,tile` | Erlaubte Teilarten des Bilds (`brick` nur allein) |
 | `--farbkategorien solid,pearl` | Erlaubte Farbkategorien |
 | `--exotische-farben` | Alle Kategorien außer Gummi (Metallic, Pearl, Chrome, Transparent, …) |
+| `--max-farben 12` | Höchstens so viele Farben (0 = alle) |
+| **Verfahren und Ausgaben** | |
 | `--dithering atkinson` / `--staerke 0.8` | Verfahren und Stärke |
+| `--farbabstand cie76\|ciede2000` | Formel für den Farbabstand (schnell bzw. genau) |
 | `--zerlegung greedy` | Zerlegungsverfahren |
 | `--ausgaben preview_png,ldraw` | Nur bestimmte Ausgaben |
 | `--ziel ordner/` | Ausgabeordner |
@@ -66,11 +80,30 @@ Wichtige Optionen von `erstellen`:
 Beispiele:
 
 ```bash
-uv run lego-mosaik erstellen katze.jpg --grundplatte 32 --platten 2x2 --rahmen 1
+uv run lego-mosaik erstellen katze.jpg --platten 3x3 --rahmen-erhoehung 1 --eckenfarbe 15
+uv run lego-mosaik erstellen katze.jpg --breite 64            # Höhe aus dem Seitenverhältnis
+uv run lego-mosaik erstellen katze.jpg --unterbau grundplatte --plattengroesse 48 --platten 1x1
 uv run lego-mosaik erstellen katze.jpg --exotische-farben --dithering atkinson
+uv run lego-mosaik interaktiv katze.jpg
 uv run lego-mosaik farben --teile tile --farbkategorien solid,pearl
 uv run lego-mosaik teile-aktualisieren --erzwingen
 ```
+
+### Interaktiver Modus
+
+`lego-mosaik interaktiv` öffnet ein Menü im Terminal:
+
+| Taste | Aktion |
+| --- | --- |
+| `1` | Bild laden (Pfad eingeben; Größe, Format und Seitenverhältnis werden angezeigt) |
+| `2`–`7` | Größe und Unterbau, Rahmen, Bild anpassen, Farben und Teile, Verfahren, Ausgaben |
+| `8` | Alle wirksamen Einstellungen als Tabelle |
+| `9` | Vorschau im Terminal: das Mosaik als farbige Blöcke, ohne Dateien zu schreiben |
+| `10` | Mosaik erstellen und alle Dateien ausgeben |
+| `11` | Farbpalette für die aktuellen Teilarten und Farbkategorien |
+| `0` | Beenden (auch Strg+D) |
+
+Bei jeder Frage steht der aktuelle Wert dabei. Enter behält ihn, `-` setzt den Standard aus `CONFIG` zurück. Ungültige Angaben werden mit einer deutschen Meldung abgelehnt; die vorherigen Einstellungen bleiben dann gültig. Das Bild kann auch direkt mitgegeben werden: `lego-mosaik interaktiv katze.jpg`.
 
 Exit-Codes: `0` Erfolg, `1` Verarbeitungsfehler (z. B. Download), `2` ungültige Eingabe.
 
@@ -80,7 +113,8 @@ Alle Standardwerte stehen **an einer Stelle**: `CONFIG` in `src/lego_mosaik/main
 
 | Bereich | Wichtige Werte (Standard) |
 | --- | --- |
-| `layout` | Grundplatte 48 × 48, 1 × 1 Platten, Grundplatte Light Bluish Gray, Rahmen 1 Noppe Schwarz |
+| `layout` | Unterbau LEGO-Art-Paneele (16 × 16), 3 × 3 Platten = 48 × 48 Noppen, freie Größe aus, 2 Pins pro Naht |
+| `frame` | 1 Noppe Schwarz, Ecken wie Rahmen, nur Tiles, eine Plate erhöht |
 | `palette` | Teilarten Plate + Tile, Kategorie `solid`, `include_color_ids`, `exclude_color_ids`, `max_colors` |
 | `dithering` | `floyd_steinberg`, Stärke 1.0, CIEDE2000, Serpentine |
 | `tiling` | `greedy`, längste Teilseite 8, Zerlegung pro Abschnitt |
@@ -93,10 +127,22 @@ Alle Standardwerte stehen **an einer Stelle**: `CONFIG` in `src/lego_mosaik/main
 - `color_categories` legt fest, welche Oberflächen erlaubt sind: `solid`, `transparent`, `metallic`, `pearl`, `chrome`, `glitter`, `speckle`, `satin`, `milky`, `rubber`.
 - Einzelne Farben lassen sich mit `include_color_ids` trotzdem erlauben oder mit `exclude_color_ids` sperren.
 
-**Größe und Rahmen:**
-- Die Gesamtgröße ist Grundplatten × Plattengröße (höchstens 256 Noppen pro Seite).
+**Größe:**
+- Entweder Platten × Plattengröße oder frei in Noppen (`width_studs`, `height_studs`), jeweils 8 bis 256 Noppen pro Seite.
+- Bei freier Größe deckt der Unterbau die Fläche mit aufgerundet vielen Platten ab (40 Noppen auf 16er-Paneelen → 3 Paneele, 8 Noppen stehen rechts über).
+- Fehlt bei freier Größe eine Seite, bekommt die Bildfläche innerhalb des Rahmens das Seitenverhältnis des Bilds (EXIF-Drehung berücksichtigt).
+
+**Unterbau (`substrate`):**
+- `ART_PANEL` (Standard): LEGO-Art-Paneele „Brick 16 x 16 x 1 1/3 with Pin Holes“ (65803). Sie haben Technic-Löcher an den Seiten; an jeder Naht stecken `pins_per_seam` Technic-Pins (2780). So hält das ganze Bild zusammen.
+- `BASEPLATE`: dünne Grundplatten 3867 (16 × 16), 3811 (32 × 32) und 4186 (48 × 48). Mehrere davon lassen sich **nicht** miteinander verbinden; nur Rahmen und Teile über den Nähten halten sie. Die Pipeline warnt deshalb bei mehr als einer Grundplatte.
+- `NONE`: ohne Unterbau.
+- Ohne `substrate_color_id` gilt: Paneele Black, Grundplatten Light Bluish Gray. Ob es das Teil in der Farbe gibt, wird gegen die Rebrickable-Daten geprüft.
+
+**Rahmen (`frame`):**
 - Der Rahmen liegt auf dem äußeren Ring; das Bild füllt die Fläche innen.
-- Die Grundplatten 3867 (16 × 16), 3811 (32 × 32) und 4186 (48 × 48) stehen in `daten/teil_geometrie.csv`. Ob es sie in der gewählten Farbe gibt, wird gegen die Rebrickable-Daten geprüft.
+- `corner_color_id`: eigene Farbe für die Ecken (`width` × `width` Noppen).
+- `part_kinds`: eigene Teilarten, z. B. nur `TILE` für einen glatten Rahmen wie bei LEGO Art.
+- `raise_plates`: hebt den Rahmen um so viele Plates über das Bild. Darunter liegen Plates in Rahmenfarbe, „auf Lücke“ verlegt (Mauerverband): Ihre Fugen liegen nie auf einer Naht des Unterbaus, sie verbinden die Platten also zusätzlich am Rand.
 
 ## Ausgaben
 
@@ -113,17 +159,17 @@ Jeder Lauf schreibt in einen eigenen Ordner, z. B. `ausgabe/2026-10-12_143005_ka
 
 ## Bauanleitung
 
-`anleitung.pdf` entsteht vollautomatisch und ohne externe Programme. Gerendert wird mit einem eigenen kleinen 3D-Renderer auf Basis von Pillow (`outputs/iso_render.py`):
+`anleitung.pdf` entsteht vollautomatisch und ohne externe Programme. Gerendert wird mit einem eigenen kleinen 3D-Renderer auf Basis von Pillow (`outputs/iso_render.py`). Gebaut wird wie bei LEGO Art: erst die stabile Grundlage, dann das Bild.
 
 1. **Titelseite:** das fertige Mosaik in 3D, Kennzahlen und eine Karte der Abschnitte
-2. **Teileübersicht:** alle Teile als gerenderte Einzelteile mit Stückzahl und Farbname
-3. **Schritt 1:** Grundplatten auslegen
-4. **Ab Schritt 2, pro Bauschritt** (einige Zeilen eines 16 × 16-Abschnitts):
-   - großer Schrittzähler
-   - hellblauer Teile-Kasten („3×“ unter jedem Teilbild)
-   - 3D-Ansicht des Abschnitts, in der die neuen Teile orange umrandet sind
-
-   Jeder Abschnitt beginnt auf einer neuen Seite, mit einer Karte, wo er im Mosaik liegt.
+2. **Teileübersicht:** alle Teile als gerenderte Einzelteile mit Stückzahl und Farbname (inklusive Paneele und Pins)
+3. **Unterbau auslegen:** Paneele bzw. Grundplatten, die Nähte sind eingezeichnet
+4. **Paneele verbinden:** Verbindungsplan mit nummerierten Paneelen; orange Balken zeigen, wo die Technic-Pins stecken
+5. **Rahmen:** erst die Stützlage(n) unter einem erhöhten Rahmen, dann der sichtbare Rahmen
+6. **Pro Abschnitt** (16 × 16, also genau ein Paneel):
+   - Fortschrittskarte: schon gebaute Abschnitte farbig, offene grau, der nächste rot umrandet
+   - pro Bauschritt ein großer Schrittzähler, der hellblaue Teile-Kasten („3×“ unter jedem Teilbild) und die 3D-Ansicht des Abschnitts mit den neuen Teilen orange umrandet
+7. **Fertig:** das ganze Mosaik und was es zusammenhält
 
 **Kamera:** Sie schaut gerade von vorne und steil von oben (wie bei LEGO Art). Zeilen und Spalten bleiben dadurch gerade und abzählbar. Einstellbar ist das über `view_elevation_deg` und `view_azimuth_deg` in `CONFIG.instructions`: Ein Azimut über 0° dreht die Ansicht und zeigt zusätzlich die Seitenflächen.
 
@@ -154,13 +200,13 @@ uv run lego-mosaik server        # danach http://127.0.0.1:8000/docs im Browser
 | `GET` | `/gesundheit` | Status und Stand des Teilekatalogs |
 | `GET` | `/farben?teile=plate,tile&exotisch=false` | Palette |
 | `GET` | `/verfahren` | Registrierte Verfahren und Ausgaben |
-| `POST` | `/mosaike` | Multipart: Datei `bild` plus optionale Felder wie bei `erstellen` → `201` mit ID, Statistik, Download-URLs |
+| `POST` | `/mosaike` | Multipart: Datei `bild` plus optionale Felder wie bei `erstellen` (z. B. `unterbau`, `breite`, `eckenfarbe`, `rahmen_erhoehung`) → `201` mit ID, Statistik, Download-URLs |
 | `GET` | `/mosaike/{id}` | Inhalt von `ergebnis.json` |
 | `GET` | `/mosaike/{id}/dateien/{dateiname}` | Datei herunterladen (nur Namen aus `ergebnis.json`) |
 | `POST` | `/teile/aktualisieren?erzwingen=false` | Katalog aktualisieren |
 
 ```bash
-curl -F bild=@katze.jpg -F platten=2x2 -F grundplatte=32 http://127.0.0.1:8000/mosaike
+curl -F bild=@katze.jpg -F platten=3x3 -F unterbau=art -F rahmen_erhoehung=1 http://127.0.0.1:8000/mosaike
 ```
 
 Fehler kommen als `{"fehler": "…"}` mit `400` (kein Bild), `404`, `413` (zu groß) oder `422` (ungültige Angaben).
@@ -212,19 +258,23 @@ journalctl --user -u lego-mosaik-update.service           # Logs
 ```text
 src/lego_mosaik/
 ├── main.py            Composition Root: CONFIG + Verdrahtung (einzige Stelle mit konkreten Klassen)
-├── config.py          Dataclasses der Konfiguration, MosaicOverrides, Validierung, Text-Parser
+├── config.py          Dataclasses der Konfiguration, OverrideInput → MosaicOverrides, Validierung
 ├── registry.py        Name → Fabrikfunktion für Dithering, Zerlegung, Ausgaben
 ├── pipeline.py        Orchestrierung; kennt nur Protocols und Domain
-├── domain/            Modelle, Palette, Layout (Grundplatten/Rahmen), Abschnitte, Fehler
+├── domain/            Modelle, Palette, Layout (Größe, Unterbau, Pins, Rahmen), Bauschritte, Fehler
 ├── sources/           Rebrickable-CSV, Studio-Farbtabelle, Updater (+ protocol.py)
 ├── imaging/           Laden, Einpassen, Farbraum Lab, Farbsuche (+ protocol.py)
 ├── dithering/         nearest, error_diffusion (Floyd-Steinberg, Atkinson, Sierra Lite), ordered
 ├── tiling/            single_stud, greedy (+ protocol.py)
-├── outputs/           Vorschau, LDraw, Teilelisten, offizielle Listen, 3D-Renderer, Anleitung, JSON
-└── interfaces/        cli.py (Typer), api.py (FastAPI)
+├── outputs/           Vorschau, LDraw, Teilelisten, offizielle Listen, 3D-Renderer, Pläne, Anleitung, JSON
+└── interfaces/        cli.py (Typer), interactive.py (Menü), display.py (Rich-Ausgaben), api.py (FastAPI)
 ```
 
-**Ablauf:** Katalog laden → Palette bauen → Bild einpassen → nach Lab umrechnen → dithern (bei `max_colors` zweimal) → Rahmen einsetzen → pro Abschnitt zerlegen → alle Writer (`result_json` zuletzt).
+**Ablauf:** Katalog laden → Palette, Farben und Unterbau prüfen → Größe bestimmen (ggf. aus dem Seitenverhältnis) → Bild einpassen → nach Lab umrechnen → dithern (bei `max_colors` zweimal) → Rahmen samt Ecken einsetzen → Bild pro Abschnitt zerlegen, Rahmen am Stück, Stützlage auf Lücke → Unterbau und Pins platzieren → alle Writer (`result_json` zuletzt).
+
+**Lagen im Mosaik:** `Mosaic` trennt Unterbau, Verbinder, Stützteile, Rahmen und Bild. `domain/sections.py` macht daraus die Bauschritte (`assembly_steps`); LDraw-Datei und Anleitung nutzen genau diese Reihenfolge.
+
+**DRY bei den Oberflächen:** CLI, interaktiver Modus und API füllen alle dasselbe `OverrideInput` (rohe Texte und Zahlen). `parse_overrides` übersetzt es an genau einer Stelle in `MosaicOverrides`, `apply_overrides` prüft das Ergebnis.
 
 **Abhängigkeitsregel:**
 - `domain` hängt von nichts ab.
@@ -241,6 +291,8 @@ src/lego_mosaik/
 - Protocol (strukturelle Typisierung)
 - Facade: `PillowImagePreparer`
 - Builder: Anleitung aus Einheiten zusammensetzen, die nie über Seiten getrennt werden
+- Facade + Lazy Initialization: `pipeline.preview()` rechnet ohne Dateien, die Pipeline im Menü entsteht erst beim ersten Zugriff
+- Table-Driven Design: die Menüfragen stehen als Daten (`GROUPS` in `interactive.py`), eine Funktion fragt sie alle ab
 - Painter's Algorithm: 3D-Verdeckung durch Zeichnen von hinten nach vorne
 - Dependency Injection: Konstruktorparameter statt Konfigurationsobjekt
 - Context Manager: Zeitmessung pro Schritt
@@ -261,6 +313,7 @@ src/lego_mosaik/
   Ist die Studio-Tabelle vorhanden und findet sich kein Treffer, wird die Farbe nicht verwendet, weil sie in Studio falsch erscheinen würde. Das betrifft einige sehr neue Farben.
 - **Palette:** Eine Farbe kommt nur hinein, wenn es ein 1×1-Teil der erlaubten Teilarten in ihr gibt.
 - **Draufsicht:** Es dürfen nur Teilarten gleicher Höhe gemischt werden (Plate + Tile; Brick nur allein).
+- **LEGO-Art-Paneel und Pins (Annahmen, bitte in Studio prüfen):** 65803 ist 32 LDU hoch, der Ursprung der LDraw-Datei liegt wie bei Plates an der Oberkante. Der Pin 2780 liegt in LDraw entlang z (`ldraw_long_axis`), seine Mitte sitzt `connector_depth_ldu` = 16 LDU unter der Paneel-Oberkante. Die Pins sind gleichmäßig auf jede Naht verteilt (bei 2 Pins: Noppe 4 und 12). Die genaue Lage der Seitenlöcher von 65803 habe ich nicht verlässlich gefunden. `scripts/orientierung.py` erzeugt dafür `art_paneele/mosaik.ldr`, und `scripts/ldraw_achsen_pruefen.py` prüft die Pin-Achse gegen Studios LDraw-Bibliothek.
 
 ## Entwicklung
 
@@ -276,6 +329,8 @@ Die Tests in `tests/test_studio_reference.py` gleichen BrickLink-Nummern und Tei
 
 ## Grenzen
 
-- Nur Draufsicht (eine Lage); ein stehendes Mosaik aus gestapelten Bricks wäre eine weitere Strategie.
+- Nur Draufsicht (eine Lage Bild); ein stehendes Mosaik aus gestapelten Bricks wäre eine weitere Strategie.
+- Lose Grundplatten (`--unterbau grundplatte` mit mehreren Platten) halten nur über Rahmen und Teile an den Nähten zusammen; stabil ist der Art-Unterbau.
+- Kein Aufhänger (LEGO Art hat ein eigenes Element dafür) und kein Signatur-Tile.
 - Die Greedy-Zerlegung findet nicht immer die minimale Teilezahl, ist aber schnell und deterministisch.
 - Kein `.io`-Export, kein Preisabgleich, keine Prüfung der Verfügbarkeit bei Pick a Brick.
