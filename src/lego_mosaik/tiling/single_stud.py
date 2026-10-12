@@ -4,7 +4,14 @@ from collections.abc import Sequence
 
 lazy import numpy as np
 
-from lego_mosaik.domain.models import IndexGrid, LegoColor, PartCatalog, PartKind, Placement
+from lego_mosaik.domain.models import (
+    EMPTY_CELL,
+    IndexGrid,
+    LegoColor,
+    PartCatalog,
+    PartKind,
+    Placement,
+)
 from lego_mosaik.tiling.common import single_stud_part, validate_uniform_height
 
 
@@ -21,11 +28,15 @@ class SingleStudTiling:
     def tile(
         self, color_grid: IndexGrid, palette: Sequence[LegoColor], catalog: PartCatalog
     ) -> list[Placement]:
-        """Zerlegt das Raster in lauter 1×1-Teile (zeilenweise, oben links beginnend)."""
+        """Zerlegt das Raster in lauter 1×1-Teile (zeilenweise, oben links beginnend).
+
+        Zellen mit ``EMPTY_CELL`` bleiben frei.
+        """
         validate_uniform_height(catalog, self._part_kinds)
         parts = [single_stud_part(catalog, color, self._part_kinds) for color in palette]
         # np.ndenumerate liefert zeilenweise ((zeile, spalte), wert) für jede Zelle
         return [
             Placement(parts[int(index)], palette[int(index)], row, col)
             for (row, col), index in np.ndenumerate(color_grid)
+            if index != EMPTY_CELL
         ]

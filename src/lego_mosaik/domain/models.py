@@ -28,6 +28,10 @@ type RgbTuple = tuple[int, int, int]
 # Höhe einer Plate in LDraw-Einheiten (LDU). Eine Noppe ist 20 LDU breit.
 PLATE_HEIGHT_LDU = 8
 
+# Palettenindex für Zellen, die eine Zerlegung frei lassen soll (z. B. die
+# Innenfläche, wenn nur der Rahmen zerlegt wird). Echte Indizes sind immer >= 0.
+EMPTY_CELL = -1
+
 
 class PartKind(StrEnum):
     """Teilart. ``StrEnum``: Jeder Wert ist zugleich ein ``str`` ("plate" == PartKind.PLATE)."""
@@ -35,11 +39,28 @@ class PartKind(StrEnum):
     PLATE = "plate"
     TILE = "tile"
     BRICK = "brick"
-    BASEPLATE = "baseplate"  # nur als Untergrund, nie als Mosaikpixel
+    BASEPLATE = "baseplate"  # dünne Grundplatte, nur als Untergrund
+    PANEL = "panel"  # LEGO-Art-Paneel 16 × 16 mit Technic-Löchern, nur als Untergrund
+    CONNECTOR = "connector"  # Technic-Pin, verbindet Paneele an den Seiten
 
 
 # Teilarten, aus denen das Mosaik selbst bestehen darf
 MOSAIC_PART_KINDS = (PartKind.PLATE, PartKind.TILE, PartKind.BRICK)
+
+
+class Substrate(StrEnum):
+    """Worauf das Mosaik gebaut wird (der Unterbau)."""
+
+    BASEPLATE = "baseplate"  # dünne Grundplatten; mehrere liegen nur lose nebeneinander
+    ART_PANEL = "art_panel"  # LEGO-Art-Paneele, an den Seiten mit Technic-Pins verbunden
+    NONE = "none"  # ohne Unterbau (z. B. auf eigene Platten)
+
+
+# Welche Teilart den jeweiligen Unterbau bildet (NONE hat keine)
+SUBSTRATE_PART_KINDS: Mapping[Substrate, PartKind] = {
+    Substrate.BASEPLATE: PartKind.BASEPLATE,
+    Substrate.ART_PANEL: PartKind.PANEL,
+}
 
 
 class LongAxis(StrEnum):
@@ -214,6 +235,8 @@ class Placement:
         row: Oberste Zeile, die das Teil belegt.
         col: Linke Spalte, die das Teil belegt.
         rotated: True, wenn die lange Seite entlang der Zeilen (nach unten) liegt.
+        bottom_ldu: Höhe der Unterkante über der Oberseite des Unterbaus in LDU
+            (0 = direkt auf Grundplatte/Paneel; ein erhöhter Rahmen liegt höher).
     """
 
     part: PartType
@@ -221,6 +244,12 @@ class Placement:
     row: int
     col: int
     rotated: bool = False
+    bottom_ldu: int = 0
+
+    @property
+    def top_ldu(self) -> int:
+        """Höhe der Oberkante über dem Unterbau in LDU."""
+        return self.bottom_ldu + self.part.height_ldu
 
     @property
     def cols_spanned(self) -> int:
@@ -245,16 +274,23 @@ class Placement:
 # deshalb verzichten wir auf den generierten Gleichheitsvergleich (Identität reicht).
 @dataclass(frozen=True, slots=True, eq=False)
 class Mosaic:
-    """Das fertige Mosaik.
+    """Das fertige Mosaik, aufgeteilt in Lagen in Bau-Reihenfolge.
+
+    Von unten nach oben: Unterbau (Grundplatten oder Art-Paneele) → Verbinder
+    (Technic-Pins zwischen den Paneelen) → Stützteile unter einem erhöhten Rahmen →
+    Rahmen → Bild. Rahmen und Bild bilden zusammen die sichtbare Oberfläche.
 
     Attributes:
         title: Anzeigename, meist der Bilddateiname ohne Endung.
         width: Breite in Noppen.
         height: Höhe in Noppen.
-        color_grid: H×W-Raster mit Indizes in ``palette``.
-        palette: Die beim Dithering verwendeten Farben.
-        placements: Alle platzierten Teile des Mosaiks (eine Lage, inklusive Rahmen).
-        baseplates: Grundplatten unter dem Mosaik (leer, wenn ohne Grundplatte).
+        color_grid: H×W-Raster mit Indizes in ``palette`` (sichtbare Oberfläche inkl. Rahmen).
+        palette: Die beim Dithering verwendeten Farben (plus Rahmenfarben).
+        placements: Die Teile des Bilds innerhalb des Rahmens (werden pro Abschnitt gebaut).
+        frame: Die sichtbaren Teile des Rahmens.
+        supports: Unsichtbare Plates unter einem erhöhten Rahmen.
+        substrate: Grundplatten bzw. Art-Paneele unter dem Mosaik (leer = ohne Unterbau).
+        connectors: Technic-Pins, die benachbarte Art-Paneele verbinden.
         element_ids: LEGO-Element-IDs der genutzten (Teilenummer, Farb-ID)-Kombinationen.
         metadata: Zusatzinfos für Ausgaben (z. B. Konfiguration und Statistik als JSON-fähige
             Werte). Die Domain kennt deren Aufbau nicht, sie reicht sie nur durch.
@@ -266,23 +302,31 @@ class Mosaic:
     color_grid: IndexGrid
     palette: tuple[LegoColor, ...]
     placements: tuple[Placement, ...]
-    baseplates: tuple[Placement, ...] = ()
+    frame: tuple[Placement, ...] = ()
+    supports: tuple[Placement, ...] = ()
+    substrate: tuple[Placement, ...] = ()
+    connectors: tuple[Placement, ...] = ()
     element_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     @property
+    def surface(self) -> tuple[Placement, ...]:
+        """Alle von oben sichtbaren Teile: Rahmen und Bild (z. B. für die Vorschau)."""
+        return self.frame + self.placements
+
+    @property
     def all_parts(self) -> tuple[Placement, ...]:
-        """Grundplatten und Mosaikteile zusammen (z. B. für Teilelisten)."""
-        return self.baseplates + self.placements
+        """Alle Teile aller Lagen zusammen (z. B. für Teilelisten)."""
+        return self.substrate + self.connectors + self.supports + self.surface
 
     def color_at(self, row: int, col: int) -> LegoColor:
         """Farbe der Zelle (Zeile, Spalte)."""
         return self.palette[int(self.color_grid[row, col])]
 
     def used_colors(self) -> tuple[LegoColor, ...]:
-        """Tatsächlich genutzte Farben, sortiert nach Rebrickable-ID."""
+        """Tatsächlich sichtbare Farben, sortiert nach Rebrickable-ID."""
         # set-Comprehension entfernt Duplikate, sorted macht die Reihenfolge deterministisch
-        used = {placement.color for placement in self.placements}
+        used = {placement.color for placement in self.surface}
         return tuple(sorted(used, key=lambda color: color.id))
 
 

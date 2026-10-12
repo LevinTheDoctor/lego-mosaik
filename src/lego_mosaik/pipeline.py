@@ -16,30 +16,50 @@ from datetime import datetime
 from pathlib import Path
 
 lazy import numpy as np
+lazy import numpy.typing as npt
 
-from lego_mosaik.config import AppConfig, MosaicOverrides, apply_overrides, config_to_dict
+from lego_mosaik.config import (
+    AppConfig,
+    MosaicOverrides,
+    apply_overrides,
+    config_to_dict,
+    frame_part_kinds,
+    substrate_color_id,
+)
 from lego_mosaik.domain.errors import ConfigError
 from lego_mosaik.domain.layout import (
     LayoutSize,
     apply_frame,
-    baseplate_placements,
-    find_baseplate,
-    layout_size,
-    require_baseplate_color,
-    require_frame_color,
+    complete_size,
+    connector_placements,
+    custom_layout_size,
+    find_connector,
+    find_substrate_part,
+    frame_mask,
+    grid_layout_size,
+    require_part_color,
+    require_single_stud_color,
+    running_bond_offset,
+    substrate_placements,
 )
 from lego_mosaik.domain.models import (
+    EMPTY_CELL,
+    PLATE_HEIGHT_LDU,
+    SUBSTRATE_PART_KINDS,
     IndexGrid,
     LegoColor,
     Mosaic,
     PartCatalog,
+    PartKind,
+    PartType,
     Placement,
+    Substrate,
     TilingStats,
 )
 from lego_mosaik.domain.palette import build_palette, most_used_colors
 from lego_mosaik.domain.sections import split_sections
 lazy from lego_mosaik.dithering.protocol import ColorSpace, Ditherer
-lazy from lego_mosaik.imaging.protocol import ImagePreparer, RgbImage
+lazy from lego_mosaik.imaging.protocol import ImageInfo, ImagePreparer, RgbImage
 lazy from lego_mosaik.outputs.protocol import OutputWriter
 lazy from lego_mosaik.sources.protocol import (
     CatalogUpdaterProtocol,
@@ -63,12 +83,20 @@ type StepCallback = Callable[[str], None]
 
 @dataclass(frozen=True, slots=True)
 class PipelineComponents:
-    """Die austauschbaren Bausteine eines Laufs (von ``main.py`` gebaut)."""
+    """Die austauschbaren Bausteine eines Laufs (von ``main.py`` gebaut).
+
+    Attributes:
+        tiler: Zerlegt das Bild.
+        frame_tiler: Zerlegt den Rahmen (eigene Teilarten, z. B. nur Tiles).
+        support_tiler: Zerlegt die Plates unter einem erhöhten Rahmen.
+    """
 
     image_preparer: ImagePreparer
     color_space: ColorSpace
     ditherer: Ditherer
     tiler: TilingStrategy
+    frame_tiler: TilingStrategy
+    support_tiler: TilingStrategy
     writers: tuple[OutputWriter, ...]
 
 
@@ -166,7 +194,30 @@ class MosaicPipeline:
         run_config = apply_overrides(self.config, overrides or MosaicOverrides())
         return _palette(self.load_catalog(run_config), run_config)
 
+    def inspect_image(self, image: Path | bytes) -> ImageInfo:
+        """Prüft ein Bild und liefert Größe und Format (z. B. für den interaktiven Modus).
+
+        Raises:
+            InvalidImageError: Wenn die Datei fehlt oder kein lesbares Bild ist.
+        """
+        return self._component_factory(self.config).image_preparer.inspect(image)
+
     # --- Mosaik erzeugen -------------------------------------------------------
+
+    def preview(
+        self,
+        image: Path | bytes,
+        overrides: MosaicOverrides | None = None,
+        *,
+        title: str = DEFAULT_TITLE,
+        on_step: StepCallback | None = None,
+    ) -> Mosaic:
+        """Berechnet das Mosaik, ohne Dateien zu schreiben (schnelle Vorschau).
+
+        Raises:
+            LegoMosaicError: Bei ungültiger Eingabe oder Verarbeitungsfehlern.
+        """
+        return self._build(image, overrides, title, _Timer(on_step)).mosaic
 
     def run(
         self,
@@ -187,46 +238,64 @@ class MosaicPipeline:
         Raises:
             LegoMosaicError: Bei ungültiger Eingabe oder Verarbeitungsfehlern.
         """
+        timer = _Timer(on_step)
+        build = self._build(image, overrides, title, timer)
+        target_dir = self._create_target_dir(build.config.output_dir, title)
+        with timer.step("Ausgaben schreiben"):
+            files = _write_outputs(build.components.writers, build.mosaic, target_dir)
+        build.stats["dauer_sekunden"] = dict(timer.durations)
+        return MosaicResult(target_dir.name, build.mosaic, target_dir, files, build.stats)
+
+    def _build(
+        self,
+        image: Path | bytes,
+        overrides: MosaicOverrides | None,
+        title: str,
+        timer: _Timer,
+    ) -> _Build:
+        """Alle Rechenschritte bis zum fertigen Mosaik (ohne Dateien)."""
         run_config = apply_overrides(self.config, overrides or MosaicOverrides())
         components = self._component_factory(run_config)
-        timer = _Timer(on_step)
         with timer.step("Teilekatalog laden"):
             catalog = self.load_catalog(run_config)
             palette = _palette(catalog, run_config)
-            layout = _Layout.resolve(catalog, run_config)
+            materials = _Materials.resolve(catalog, run_config)
         with timer.step("Bild laden und einpassen"):
+            size = _layout_size(run_config, components.image_preparer, image)
             rgb = components.image_preparer.prepare(
                 image,
-                width=layout.size.image_width,
-                height=layout.size.image_height,
-                pad_color=layout.pad_color.rgb,
+                width=size.image_width,
+                height=size.image_height,
+                pad_color=materials.pad_color.rgb,
             )
         with timer.step("Dithering"):
             grid, palette = _dither(components, rgb, palette, run_config.palette.max_colors)
             grid, palette = apply_frame(
-                grid, palette, run_config.layout.frame_width, layout.frame_color
+                grid,
+                palette,
+                run_config.frame.width,
+                materials.frame_color,
+                materials.corner_color,
             )
         with timer.step("Zerlegung in Teile"):
-            section = run_config.instructions.section_studs
-            size = section if run_config.tiling.split_sections else max(grid.shape)
-            placements = _tile_sections(components.tiler, grid, palette, catalog, size)
-        stats = _stats(layout.size, placements, timer.durations)
+            layers = _tile_layers(components, grid, palette, catalog, run_config)
+            substrate, connectors = _substrate_layers(materials, size, run_config)
+        stats = _stats(size, layers, substrate, connectors, timer.durations)
         mosaic = Mosaic(
             title=title,
-            width=layout.size.width,
-            height=layout.size.height,
+            width=size.width,
+            height=size.height,
             color_grid=grid,
             palette=palette,
-            placements=placements,
-            baseplates=layout.baseplates,
+            placements=layers.image,
+            frame=layers.frame,
+            supports=layers.supports,
+            substrate=substrate,
+            connectors=connectors,
             element_ids=catalog.element_ids,
             metadata={"konfiguration": config_to_dict(run_config), "statistik": stats},
         )
-        target_dir = self._create_target_dir(run_config.output_dir, title)
-        with timer.step("Ausgaben schreiben"):
-            files = _write_outputs(components.writers, mosaic, target_dir)
-        stats["dauer_sekunden"] = dict(timer.durations)
-        return MosaicResult(target_dir.name, mosaic, target_dir, files, stats)
+        return _Build(run_config, components, mosaic, stats)
 
     def _create_target_dir(self, output_dir: Path, title: str) -> Path:
         """Legt ``<ausgabe>/<zeitstempel>_<titel>`` an; bei Kollision mit Zähler."""
@@ -239,33 +308,172 @@ class MosaicPipeline:
 
 
 @dataclass(frozen=True, slots=True)
-class _Layout:
-    """Aufgelöstes Layout eines Laufs (Farben und Grundplatten aus dem Katalog)."""
+class _Build:
+    """Zwischenergebnis eines Laufs: Konfiguration, Bausteine, Mosaik und Kennzahlen."""
 
-    size: LayoutSize
+    config: AppConfig
+    components: PipelineComponents
+    mosaic: Mosaic
+    stats: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _Materials:
+    """Farben und Unterbau-Teile eines Laufs, gegen den Katalog geprüft.
+
+    Alle Prüfungen passieren vor dem Laden des Bilds, damit Tippfehler in Farb-IDs
+    sofort mit einer deutschen Meldung auffallen.
+    """
+
     frame_color: LegoColor
+    corner_color: LegoColor | None
     pad_color: LegoColor
-    baseplates: tuple[Placement, ...]
+    substrate: tuple[PartType, LegoColor] | None
+    connector: tuple[PartType, LegoColor] | None
 
     @classmethod
-    def resolve(cls, catalog: PartCatalog, config: AppConfig) -> _Layout:
-        """Prüft Farben und Grundplatte gegen den Katalog (deutsche Fehlermeldungen)."""
-        layout = config.layout
-        size = layout_size(
-            layout.baseplate_studs, layout.plates_wide, layout.plates_high, layout.frame_width
-        )
-        frame_color = require_frame_color(catalog, layout.frame_color_id, config.palette.part_kinds)
+    def resolve(cls, catalog: PartCatalog, config: AppConfig) -> _Materials:
+        """Prüft Rahmen-, Ecken-, Rand- und Unterbaufarben (deutsche Fehlermeldungen)."""
+        frame, kinds = config.frame, frame_part_kinds(config)
+        frame_color = require_single_stud_color(catalog, frame.color_id, kinds, "Rahmenfarbe")
+        if frame.width and frame.raise_plates:  # Stützlagen brauchen Plates in der Rahmenfarbe
+            require_single_stud_color(
+                catalog, frame.color_id, (PartKind.PLATE,), "Rahmenfarbe (Erhöhung, Plates)"
+            )
+        corner_color = None
+        if frame.corner_color_id is not None:
+            corner_color = require_single_stud_color(
+                catalog, frame.corner_color_id, kinds, "Eckenfarbe"
+            )
         pad_color = catalog.colors.get(config.mosaic.pad_color_id)
         if pad_color is None:
             raise ConfigError(f"Die Randfarbe {config.mosaic.pad_color_id} ist unbekannt.")
-        baseplates: tuple[Placement, ...] = ()
-        if layout.include_baseplate:
-            baseplate = find_baseplate(catalog, layout.baseplate_studs)
-            color = require_baseplate_color(catalog, baseplate, layout.baseplate_color_id)
-            baseplates = baseplate_placements(
-                baseplate, color, layout.plates_wide, layout.plates_high
-            )
-        return cls(size, frame_color, pad_color, baseplates)
+        substrate, connector = _substrate_materials(catalog, config)
+        return cls(frame_color, corner_color, pad_color, substrate, connector)
+
+
+def _substrate_materials(
+    catalog: PartCatalog, config: AppConfig
+) -> tuple[tuple[PartType, LegoColor] | None, tuple[PartType, LegoColor] | None]:
+    """Unterbau-Platte und (bei Art-Paneelen) Verbinder samt geprüfter Farbe."""
+    layout = config.layout
+    if layout.substrate is Substrate.NONE:
+        return None, None
+    part = find_substrate_part(catalog, SUBSTRATE_PART_KINDS[layout.substrate], layout.plate_studs)
+    substrate = part, require_part_color(catalog, part, substrate_color_id(layout))
+    if layout.substrate is not Substrate.ART_PANEL:
+        return substrate, None
+    pin = find_connector(catalog)
+    return substrate, (pin, require_part_color(catalog, pin, layout.connector_color_id))
+
+
+def _layout_size(config: AppConfig, preparer: ImagePreparer, image: Path | bytes) -> LayoutSize:
+    """Größe aus Platten oder frei; eine fehlende Seite kommt aus dem Seitenverhältnis."""
+    layout, frame = config.layout, config.frame.width
+    if not layout.custom_size:
+        size = grid_layout_size(layout.plate_studs, layout.plates_wide, layout.plates_high, frame)
+    else:
+        width, height = layout.width_studs, layout.height_studs
+        if width is None or height is None:
+            ratio = preparer.inspect(image).aspect_ratio
+            width, height = complete_size(width, height, ratio, frame)
+            logger.info("Größe aus dem Seitenverhältnis: %d × %d Noppen.", width, height)
+        size = custom_layout_size(width, height, layout.plate_studs, frame)
+    if layout.substrate is Substrate.BASEPLATE and size.plates_wide * size.plates_high > 1:
+        logger.warning(
+            "Mehrere Grundplatten liegen nur lose nebeneinander. Für ein stabiles Bild "
+            "„--unterbau art“ (LEGO-Art-Paneele mit Technic-Pins) verwenden."
+        )
+    return size
+
+
+@dataclass(frozen=True, slots=True)
+class _Layers:
+    """Zerlegte Lagen: Bild (pro Abschnitt), Rahmen und Stützteile darunter."""
+
+    image: tuple[Placement, ...]
+    frame: tuple[Placement, ...]
+    supports: tuple[Placement, ...]
+
+
+def _tile_layers(
+    components: PipelineComponents,
+    grid: IndexGrid,
+    palette: tuple[LegoColor, ...],
+    catalog: PartCatalog,
+    config: AppConfig,
+) -> _Layers:
+    """Zerlegt Bild und Rahmen getrennt; ein erhöhter Rahmen bekommt Stützlagen.
+
+    Der Rahmen wird am Stück zerlegt (seine Teile dürfen Abschnittsgrenzen und
+    Plattennähte überbrücken), das Bild pro Abschnitt.
+    """
+    height, width = grid.shape
+    ring = frame_mask(height, width, config.frame.width)
+    section = config.instructions.section_studs
+    size = section if config.tiling.split_sections else max(height, width)
+    # np.where(Bedingung, a, b): pro Zelle a, wo die Bedingung gilt, sonst b
+    image_grid = np.where(ring, EMPTY_CELL, grid).astype(np.intp)
+    image = _tile_sections(components.tiler, image_grid, palette, catalog, size)
+    if not ring.any():
+        return _Layers(image, (), ())
+    raise_ldu = config.frame.raise_plates * PLATE_HEIGHT_LDU
+    frame_grid = np.where(ring, grid, EMPTY_CELL).astype(np.intp)
+    frame = tuple(
+        replace(placement, bottom_ldu=raise_ldu)
+        for placement in components.frame_tiler.tile(frame_grid, palette, catalog)
+    )
+    supports = _supports(components.support_tiler, ring, palette, catalog, config)
+    return _Layers(image, frame, supports)
+
+
+def _supports(
+    tiler: TilingStrategy,
+    ring: npt.NDArray[np.bool_],
+    palette: tuple[LegoColor, ...],
+    catalog: PartCatalog,
+    config: AppConfig,
+) -> tuple[Placement, ...]:
+    """Plates unter einem erhöhten Rahmen, „auf Lücke“ gelegt (Mauerverband).
+
+    Die Abschnitte für die Zerlegung sind gegenüber den Nähten des Unterbaus
+    verschoben (``running_bond_offset``). Weil kein Teil eine Abschnittsgrenze
+    überquert, liegen die Fugen der Stützlage nie auf einer Naht: Die Stützteile
+    überbrücken die Nähte und halten die Platten am Rand zusammen.
+    """
+    if config.frame.raise_plates == 0:
+        return ()
+    frame_color = catalog.colors[config.frame.color_id]
+    grid = np.where(ring, palette.index(frame_color), EMPTY_CELL).astype(np.intp)
+    seam = config.layout.plate_studs
+    lengths = [
+        part.length_studs
+        for part in catalog.parts_in_color(frame_color.id, (PartKind.PLATE,))
+        if part.length_studs <= config.tiling.max_part_length
+    ]
+    offset = running_bond_offset(seam, max(lengths, default=1))
+    layer = _tile_sections(tiler, grid, palette, catalog, seam, offset=offset)
+    return tuple(
+        replace(placement, bottom_ldu=level * PLATE_HEIGHT_LDU)
+        for level in range(config.frame.raise_plates)
+        for placement in layer
+    )
+
+
+def _substrate_layers(
+    materials: _Materials, size: LayoutSize, config: AppConfig
+) -> tuple[tuple[Placement, ...], tuple[Placement, ...]]:
+    """Unterbau-Platten und die Pins, die benachbarte Art-Paneele verbinden."""
+    if materials.substrate is None:
+        return (), ()
+    part, color = materials.substrate
+    plates = substrate_placements(part, color, size.plates_wide, size.plates_high)
+    if materials.connector is None:
+        return plates, ()
+    pin, pin_color = materials.connector
+    layout = config.layout
+    pins = connector_placements(pin, pin_color, size, layout.plate_studs, layout.pins_per_seam)
+    return plates, pins
 
 
 def _palette(catalog: PartCatalog, config: AppConfig) -> tuple[LegoColor, ...]:
@@ -313,6 +521,8 @@ def _tile_sections(
     palette: tuple[LegoColor, ...],
     catalog: PartCatalog,
     section_studs: int,
+    *,
+    offset: int = 0,
 ) -> tuple[Placement, ...]:
     """Zerlegt jeden Abschnitt einzeln und verschiebt die Teile an ihre echte Position.
 
@@ -320,7 +530,7 @@ def _tile_sections(
     """
     height, width = grid.shape
     placements: list[Placement] = []
-    for section in split_sections(width, height, section_studs):
+    for section in split_sections(width, height, section_studs, offset=offset):
         # Slicing schneidet den Abschnitt aus; die Strategie sieht nur dieses Teilraster
         sub_grid = grid[
             section.row : section.row + section.rows, section.col : section.col + section.cols
@@ -333,17 +543,25 @@ def _tile_sections(
 
 
 def _stats(
-    size: LayoutSize, placements: Sequence[Placement], durations: Mapping[str, float]
+    size: LayoutSize,
+    layers: _Layers,
+    substrate: Sequence[Placement],
+    connectors: Sequence[Placement],
+    durations: Mapping[str, float],
 ) -> dict[str, object]:
     """Kennzahlen des Laufs als JSON-fähiges dict."""
-    tiling = TilingStats.from_placements(size.width, size.height, placements)
+    surface = layers.frame + layers.image
+    tiling = TilingStats.from_placements(size.width, size.height, surface)
     return {
         "breite": size.width,
         "hoehe": size.height,
         "bild_breite": size.image_width,
         "bild_hoehe": size.image_height,
-        "farben": len({placement.color.id for placement in placements}),
+        "farben": len({placement.color.id for placement in surface}),
         **asdict(tiling),  # pixels, parts, savings_percent
+        "stuetzteile": len(layers.supports),
+        "unterbau_platten": len(substrate),
+        "verbinder": len(connectors),
         "dauer_sekunden": dict(durations),
     }
 

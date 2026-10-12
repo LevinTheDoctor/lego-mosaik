@@ -1,14 +1,18 @@
 """Bauanleitung im LEGO-Stil als PNG-Seiten und mehrseitiges PDF (nur mit Pillow).
 
-Aufbau:
+Aufbau (wie bei LEGO Art: erst die stabile Grundlage, dann das Bild):
 
 1. Titelseite: gerendertes Mosaik (3D), Abschnittskarte und Kennzahlen
 2. Teileübersicht: alle Teile als gerenderte Einzelteile mit Stückzahl
-3. Schritt 1: Grundplatten auslegen (falls vorhanden)
-4. Pro Bauschritt: Teile-Kasten („3×“ unter jedem Teilbild) und 3D-Ansicht des
-   Abschnitts; neue Teile sind orange umrandet
+3. Unterbau auslegen: Grundplatten bzw. LEGO-Art-Paneele
+4. Paneele verbinden: Verbindungsplan mit den Technic-Pins
+5. Rahmen: erst die Stützlagen (auf Lücke über den Nähten), dann der sichtbare Rahmen
+6. Pro Abschnitt eine Fortschrittskarte (was steht schon, wo geht es weiter), dann
+   die Bauschritte: Teile-Kasten („3×“ unter jedem Teilbild) und 3D-Ansicht; neue
+   Teile sind orange umrandet
+7. Fertig: das ganze Mosaik
 
-Die Schritte sind exakt die der LDraw-Datei (``domain.sections.build_steps``).
+Die Schritte sind exakt die der LDraw-Datei (``domain.sections.assembly_steps``).
 Seiten werden automatisch gefüllt: Was zusammengehört (ein Schritt), bleibt auf
 einer Seite; passen zwei Schritte auf eine Seite, stehen sie untereinander.
 """
@@ -31,9 +35,21 @@ from lego_mosaik.domain.models import (
     Placement,
     RgbTuple,
 )
-from lego_mosaik.domain.sections import BuildStep, Section, build_steps, split_sections
-from lego_mosaik.outputs.iso_render import Area, IsoView, RenderCell, render_iso
-from lego_mosaik.outputs.rendering import Region, render_placements
+from lego_mosaik.domain.sections import (
+    BuildStep,
+    Section,
+    StepKind,
+    assembly_steps,
+    split_sections,
+)
+from lego_mosaik.outputs.iso_render import Area, IsoView, RenderCell, Underlay, render_iso
+from lego_mosaik.outputs.plans import (
+    connection_plan,
+    map_stud_px,
+    pin_icon,
+    section_map,
+)
+from lego_mosaik.outputs.rendering import Font
 
 logger = logging.getLogger(__name__)
 
@@ -46,23 +62,44 @@ BLACK: RgbTuple = (0, 0, 0)
 GRAY_TEXT: RgbTuple = (90, 90, 90)
 CALLOUT_FILL: RgbTuple = (226, 238, 248)  # hellblauer Teile-Kasten wie bei LEGO
 CALLOUT_BORDER: RgbTuple = (120, 160, 200)
-MAP_HIGHLIGHT: RgbTuple = (220, 30, 30)
-MAP_HIGHLIGHT_WIDTH = 4
+# Noch nicht gebaute Flächen auf den Karten: neutral, damit jede Steinfarbe auffällt
+# (in Unterbau-Farbe wäre z. B. ein schwarzer Rahmen auf schwarzen Paneelen unsichtbar)
+UNBUILT_RGB: RgbTuple = (215, 215, 215)
 TITLE_SIZE, STEP_SIZE, HEADING_SIZE, BODY_SIZE, SMALL_SIZE = 44, 56, 30, 22, 18
 BLOCK_SPACING = 18
 LINE_SPACING = 1.35
 ICON_SCALE = 1.4  # Pixel pro LDU für Teilbilder (alle Teile im selben Maßstab)
 ICON_MAX_PX = 220  # große Teile (Grundplatten) werden auf diese Größe eingepasst
+PIN_ICON_PX = 70  # Breite des Pin-Symbols
 ICON_GAP = 22
 CALLOUT_PADDING = 16
 COVER_MAP_PX = 420  # Abschnittskarte auf der Titelseite
-INTRO_MAP_PX = 240  # kleinere Karte am Anfang jedes Abschnitts
+INTRO_MAP_PX = 300  # Fortschrittskarte am Anfang jedes Abschnitts
+PLAN_PX = 700  # Verbindungsplan der Paneele
 COVER_RENDER_HEIGHT = 900
 LARGE_RENDER_CELLS = 4096  # ab so vielen Zellen ohne Supersampling (schneller)
 
-type Font = ImageFont.FreeTypeFont | ImageFont.ImageFont
 type Block = Image.Image
 type Unit = tuple[Block, ...]  # Blöcke, die auf derselben Seite bleiben
+
+# Überschriften der Schritte vor dem Bild
+_SUBSTRATE_TITLES = {
+    PartKind.BASEPLATE: "Grundplatten auslegen",
+    PartKind.PANEL: "LEGO-Art-Paneele auslegen",
+}
+_LOOSE_BASEPLATES_HINT = (
+    "Hinweis: Grundplatten lassen sich nicht miteinander verbinden. Nur Rahmen und "
+    "Teile über den Nähten halten sie zusammen; stabiler wird das Bild mit "
+    "LEGO-Art-Paneelen („--unterbau art“)."
+)
+_CONNECTOR_HINT = (
+    "Je einen Pin zur Hälfte in das Loch an der Seite eines Paneels stecken und das "
+    "Nachbarpaneel aufschieben. Orange im Plan: Lage der Pins an jeder Naht."
+)
+_SUPPORT_HINT = (
+    "Die Plates liegen auf Lücke: Sie überbrücken die Nähte zwischen den Platten "
+    "und heben den Rahmen über das Bild."
+)
 
 
 class PageBreak:
@@ -143,63 +180,65 @@ class _DocumentBuilder:
         self.mosaic = mosaic
         self.layout = layout
         self.sections = split_sections(mosaic.width, mosaic.height, layout.section_studs)
-        self.steps = build_steps(
-            mosaic.placements,
-            width=mosaic.width,
-            height=mosaic.height,
-            section_studs=layout.section_studs,
-            rows_per_step=layout.rows_per_step,
+        self.steps = assembly_steps(
+            mosaic, section_studs=layout.section_studs, rows_per_step=layout.rows_per_step
         )
-        # Jede Platzierung bekommt eine Nummer; daran erkennt der Renderer Teilgrenzen
-        self.part_ids = {placement: index for index, placement in enumerate(mosaic.placements)}
+        # Jede sichtbare oder stützende Platzierung bekommt eine Nummer; daran
+        # erkennt der Renderer Teilgrenzen (Unterbau und Pins rendert er anders)
+        stacked = mosaic.supports + mosaic.surface
+        self.part_ids = {placement: index for index, placement in enumerate(stacked)}
         self.icons = _IconCache(layout)
-        self.baseplate_rgb = mosaic.baseplates[0].color.rgb if mosaic.baseplates else None
-        self._maps: dict[int, tuple[Block, int]] = {}
+        self.underlay = _underlay(mosaic.substrate)
+        self.full_area = Area(0, 0, mosaic.height, mosaic.width)
 
     def document(self) -> list[Unit | PageBreak]:
-        """Alle Einheiten mit Seitenumbrüchen vor Teileübersicht, Schritten und Abschnitten."""
+        """Alle Einheiten; Unterbau, Verbinder, Rahmen und jeder Abschnitt auf neuer Seite."""
         doc: list[Unit | PageBreak] = [self.cover(), PAGE_BREAK, *self.inventory(), PAGE_BREAK]
-        first_number = 1
-        if self.mosaic.baseplates:
-            doc += [self.baseplate_step(), PAGE_BREAK]
-            first_number = 2
-        built: list[Placement] = []
+        built: list[Placement] = []  # was schon steht (für 3D-Ansichten und Karten)
         previous_section = 0
-        for number, step in enumerate(self.steps, start=first_number):
-            if step.section.number != previous_section:
-                if built:
-                    doc.append(PAGE_BREAK)  # jeder Abschnitt beginnt auf einer neuen Seite
-                doc.append(self.section_intro(step.section))
-                previous_section = step.section.number
-            doc.append(self.step_unit(number, step, built))
-            built += step.placements
-        return doc
+        for number, step in enumerate(self.steps, start=1):
+            if step.kind is StepKind.SECTION and step.section is not None:
+                if step.section.number != previous_section:
+                    doc += [PAGE_BREAK, self.section_intro(step.section, built)]
+                    previous_section = step.section.number
+                doc.append(self.section_step(number, step, built))
+            else:
+                doc += [self.base_step(number, step, built), PAGE_BREAK]
+            if step.kind not in (StepKind.SUBSTRATE, StepKind.CONNECTORS):
+                built += step.placements
+        return [*doc, PAGE_BREAK, self.finished()]
 
     def cover(self) -> Unit:
         """Titel, 3D-Bild des fertigen Mosaiks, Kennzahlen und Abschnittskarte."""
         mosaic, layout = self.mosaic, self.layout
-        area = Area(0, 0, mosaic.height, mosaic.width)
-        large = mosaic.width * mosaic.height > LARGE_RENDER_CELLS
-        render = render_iso(
-            self.cells(mosaic.placements, area),
-            area,
-            layout.view,
-            baseplate_rgb=self.baseplate_rgb,
-            max_width=layout.content_width,
-            max_height=COVER_RENDER_HEIGHT,
-            supersample=1 if large else layout.supersample,
-        )
-        total_steps = len(self.steps) + (1 if mosaic.baseplates else 0)
-        parts = PartsList.from_placements(mosaic.placements).total_quantity
+        parts = PartsList.from_placements(mosaic.all_parts).total_quantity
         facts = (
             f"{mosaic.width} × {mosaic.height} Noppen · {len(self.sections)} Abschnitte · "
-            f"{total_steps} Schritte · {parts} Teile · {len(mosaic.used_colors())} Farben"
+            f"{len(self.steps)} Schritte · {parts} Teile · {len(mosaic.used_colors())} Farben"
         )
         return (
             _text_block(mosaic.title, layout.font(TITLE_SIZE), layout.content_width),
-            render,
+            self.finished_render,
             _text_block(facts, layout.font(BODY_SIZE), layout.content_width),
-            self.section_map(None, COVER_MAP_PX),
+            self.section_map(mosaic.surface, None, COVER_MAP_PX),
+        )
+
+    @functools.cached_property
+    def finished_render(self) -> Block:
+        """3D-Bild des fertigen Mosaiks.
+
+        ``cached_property`` rechnet beim ersten Zugriff und merkt sich das Ergebnis;
+        Titel- und Schlussseite teilen sich so ein (teures) Rendering.
+        """
+        large = self.mosaic.width * self.mosaic.height > LARGE_RENDER_CELLS
+        return render_iso(
+            self.cells(self.mosaic.supports + self.mosaic.surface, self.full_area),
+            self.full_area,
+            self.layout.view,
+            underlay=self.underlay,
+            max_width=self.layout.content_width,
+            max_height=COVER_RENDER_HEIGHT,
+            supersample=1 if large else self.layout.supersample,
         )
 
     def inventory(self) -> list[Unit]:
@@ -212,31 +251,69 @@ class _DocumentBuilder:
         rows = _grid_rows(items, self.layout.content_width, WHITE)
         return [(heading, rows[0]), *((row,) for row in rows[1:])]
 
-    def baseplate_step(self) -> Unit:
-        """Schritt 1: alle Grundplatten nebeneinander auslegen."""
-        area = Area(0, 0, self.mosaic.height, self.mosaic.width)
+    def base_step(self, number: int, step: BuildStep, built: Sequence[Placement]) -> Unit:
+        """Ein Schritt vor dem Bild: Unterbau, Verbinder, Rahmen-Unterbau oder Rahmen."""
+        entries = PartsList.from_placements(step.placements).entries
+        head = (self.step_header(number, _base_title(step)), self.callout(entries))
+        match step.kind:
+            case StepKind.SUBSTRATE:
+                return (*head, *self.substrate_view(step.placements))
+            case StepKind.CONNECTORS:
+                return (*head, self.hint(_CONNECTOR_HINT), self.connection_plan())
+            case StepKind.FRAME_SUPPORT:
+                return (*head, self.hint(_SUPPORT_HINT), self.frame_view(step, built))
+            case _:
+                return (*head, self.frame_view(step, built))
+
+    def substrate_view(self, plates: Sequence[Placement]) -> tuple[Block, ...]:
+        """3D-Ansicht des leeren Unterbaus; lose Grundplatten bekommen einen Hinweis."""
         render = render_iso(
             {},
-            area,
+            _covered_area(plates),
             self.layout.view,
-            baseplate_rgb=self.baseplate_rgb,
+            underlay=self.underlay,
             max_width=self.layout.content_width,
             max_height=self.layout.step_render_height,
             supersample=1,
         )
-        entries = PartsList.from_placements(self.mosaic.baseplates).entries
-        return self.step_header(1, "Grundplatten auslegen"), self.callout(entries), render
+        loose = len(plates) > 1 and plates[0].part.kind is PartKind.BASEPLATE
+        return (self.hint(_LOOSE_BASEPLATES_HINT), render) if loose else (render,)
 
-    def section_intro(self, section: Section) -> Unit:
-        """Abschnittsüberschrift mit Karte, wo der Abschnitt im Mosaik liegt."""
-        text = f"Abschnitt {section.number} von {len(self.sections)}"
-        return (
-            _text_block(text, self.layout.font(HEADING_SIZE), self.layout.content_width),
-            self.section_map(section, INTRO_MAP_PX),
+    def connection_plan(self) -> Block:
+        """Schema mit nummerierten Paneelen und den Pins an den Nähten."""
+        plates = self.mosaic.substrate
+        area = _covered_area(plates)
+        stud_px = map_stud_px(area.cols, area.rows, PLAN_PX, self.layout.max_stud_px)
+        font = self.layout.font(max(SMALL_SIZE, self.layout.section_studs * stud_px // 3))
+        return connection_plan(plates, self.mosaic.connectors, stud_px=stud_px, font=font)
+
+    def frame_view(self, step: BuildStep, built: Sequence[Placement]) -> Block:
+        """3D-Ansicht des ganzen Mosaiks mit den neuen Rahmenteilen hervorgehoben."""
+        cells = self.cells([*built, *step.placements], self.full_area, set(step.placements))
+        large = self.mosaic.width * self.mosaic.height > LARGE_RENDER_CELLS
+        return render_iso(
+            cells,
+            self.full_area,
+            self.layout.view,
+            underlay=self.underlay,
+            max_width=self.layout.content_width,
+            max_height=self.layout.step_render_height,
+            supersample=1 if large else self.layout.supersample,
         )
 
-    def step_unit(self, number: int, step: BuildStep, built: Sequence[Placement]) -> Unit:
-        """Kopf, Teile-Kasten und 3D-Ansicht eines Schritts."""
+    def section_intro(self, section: Section, built: Sequence[Placement]) -> Unit:
+        """Abschnittsüberschrift mit Fortschrittskarte: was steht schon, wo geht es weiter."""
+        text = f"Abschnitt {section.number} von {len(self.sections)}"
+        caption = "Rot umrandet: hier geht es weiter. Farbig: schon gebaut. Grau: kommt noch."
+        return (
+            _text_block(text, self.layout.font(HEADING_SIZE), self.layout.content_width),
+            self.section_map(built, section, INTRO_MAP_PX),
+            self.hint(caption),
+        )
+
+    def section_step(self, number: int, step: BuildStep, built: Sequence[Placement]) -> Unit:
+        """Kopf, Teile-Kasten und 3D-Ansicht eines Bildschritts."""
+        assert step.section is not None  # nur für Bildschritte aufgerufen
         section = step.section
         area = Area(section.row, section.col, section.rows, section.cols)
         cells = self.cells([*built, *step.placements], area, highlight=set(step.placements))
@@ -244,7 +321,7 @@ class _DocumentBuilder:
             cells,
             area,
             self.layout.view,
-            baseplate_rgb=self.baseplate_rgb,
+            underlay=self.underlay,
             max_width=self.layout.content_width,
             max_height=self.layout.step_render_height,
             supersample=self.layout.supersample,
@@ -254,6 +331,22 @@ class _DocumentBuilder:
         subtitle = f"Abschnitt {section.number} · Zeilen {first_row}–{last_row}"
         entries = PartsList.from_placements(step.placements).entries
         return self.step_header(number, subtitle), self.callout(entries), render
+
+    def finished(self) -> Unit:
+        """Schlussseite: das ganze Mosaik und was es zusammenhält."""
+        mosaic = self.mosaic
+        text = f"Fertig! Alle {len(self.sections)} Abschnitte sind gebaut."
+        if mosaic.connectors:
+            text += (
+                f" Die {len(mosaic.substrate)} Paneele halten mit "
+                f"{len(mosaic.connectors)} Technic-Pins zusammen."
+            )
+        if mosaic.supports:
+            text += " Der erhöhte Rahmen überbrückt zusätzlich alle Nähte am Rand."
+        return (
+            _text_block(text, self.layout.font(HEADING_SIZE), self.layout.content_width),
+            self.finished_render,
+        )
 
     def step_header(self, number: int, subtitle: str) -> Block:
         """Große Schrittnummer links, Untertitel daneben (wie in LEGO-Anleitungen)."""
@@ -266,6 +359,10 @@ class _DocumentBuilder:
         left = round(number_font.getlength(str(number))) + BLOCK_SPACING
         draw.text((left, height / 2), subtitle, fill=GRAY_TEXT, font=small, anchor="lm")
         return block
+
+    def hint(self, text: str) -> Block:
+        """Erklärender Text in normaler Schriftgröße."""
+        return _text_block(text, self.layout.font(BODY_SIZE), self.layout.content_width)
 
     def callout(self, entries: Sequence[PartsListEntry]) -> Block:
         """Hellblauer Kasten mit den Teilen eines Schritts."""
@@ -287,7 +384,11 @@ class _DocumentBuilder:
     def cells(
         self, placements: Iterable[Placement], area: Area, highlight: set[Placement] | None = None
     ) -> dict[tuple[int, int], RenderCell]:
-        """Zellen innerhalb des Bereichs; Teile aus ``highlight`` werden hervorgehoben."""
+        """Zellen innerhalb des Bereichs; Teile aus ``highlight`` werden hervorgehoben.
+
+        Spätere Teile überschreiben frühere in derselben Zelle (der Rahmen liegt auf
+        seinen Stützteilen und ist höher, also gewinnt er).
+        """
         result = {}
         for placement in placements:
             if not _overlaps(placement, area):
@@ -297,28 +398,57 @@ class _DocumentBuilder:
                 part_id=self.part_ids[placement],
                 has_stud=placement.part.kind is not PartKind.TILE,
                 highlighted=highlight is not None and placement in highlight,
+                top_ldu=placement.top_ldu,
             )
             for row, col in placement.cells():
                 if area.contains(row, col):
                     result[(row, col)] = content
         return result
 
-    def section_map(self, current: Section | None, max_px: int) -> Block:
-        """Abschnittskarte; die Grundkarte wird pro Größe nur einmal gezeichnet (Cache)."""
-        if max_px not in self._maps:
-            self._maps[max_px] = _section_map(self.mosaic, self.sections, self.layout, max_px)
-        base, stud_px = self._maps[max_px]
-        if current is None:
-            return base
-        marked = base.copy()  # Kopie, damit die gecachte Grundkarte unverändert bleibt
-        box = (
-            current.col * stud_px,
-            current.row * stud_px,
-            (current.col + current.cols) * stud_px - 1,
-            (current.row + current.rows) * stud_px - 1,
+    def section_map(
+        self, placements: Iterable[Placement], current: Section | None, max_px: int
+    ) -> Block:
+        """Draufsicht mit Abschnittsnummern; ``current`` wird rot umrandet."""
+        mosaic = self.mosaic
+        stud_px = map_stud_px(mosaic.width, mosaic.height, max_px, self.layout.max_stud_px)
+        return section_map(
+            placements,
+            self.sections,
+            (mosaic.width, mosaic.height),
+            stud_px=stud_px,
+            font=self.layout.font(max(SMALL_SIZE, self.layout.section_studs * stud_px // 3)),
+            background=UNBUILT_RGB,
+            current=current,
         )
-        ImageDraw.Draw(marked).rectangle(box, outline=MAP_HIGHLIGHT, width=MAP_HIGHLIGHT_WIDTH)
-        return marked
+
+
+def _base_title(step: BuildStep) -> str:
+    """Untertitel der Schritte vor dem Bild."""
+    match step.kind:
+        case StepKind.SUBSTRATE:
+            return _SUBSTRATE_TITLES.get(step.placements[0].part.kind, "Unterbau auslegen")
+        case StepKind.CONNECTORS:
+            return "Paneele mit Technic-Pins verbinden"
+        case StepKind.FRAME_SUPPORT:
+            return f"Rahmen-Unterbau, Lage {step.level + 1}"
+        case _:
+            return "Rahmen"
+
+
+def _underlay(substrate: Sequence[Placement]) -> Underlay | None:
+    """Darstellung des Unterbaus: Farbe, Dicke und Fugen zwischen mehreren Platten."""
+    if not substrate:
+        return None
+    part = substrate[0].part
+    seam = part.length_studs if len(substrate) > 1 else None
+    return Underlay(substrate[0].color.rgb, thickness_ldu=part.height_ldu, seam_studs=seam)
+
+
+def _covered_area(plates: Sequence[Placement]) -> Area:
+    """Bereich, den die Unterbau-Platten zusammen abdecken (kann größer als das Bild sein)."""
+    rows = max(plate.row + plate.rows_spanned for plate in plates)
+    cols = max(plate.col + plate.cols_spanned for plate in plates)
+    return Area(0, 0, rows, cols)
 
 
 class _IconCache:
@@ -360,26 +490,33 @@ class _IconCache:
 def render_part(
     part: PartType, color: LegoColor, layout: PageLayout, background: RgbTuple
 ) -> Block:
-    """Ein einzelnes Teil als 3D-Bild, lange Seite waagerecht."""
+    """Ein einzelnes Teil als Bild, lange Seite waagerecht."""
     area = Area(0, 0, part.width_studs, part.length_studs)
-    if part.kind is PartKind.BASEPLATE:
+    if part.kind is PartKind.CONNECTOR:
+        return pin_icon(color.rgb, background, PIN_ICON_PX)
+    if part.kind in (PartKind.BASEPLATE, PartKind.PANEL):
         return render_iso(
             {},
             area,
             layout.view,
-            baseplate_rgb=color.rgb,
+            underlay=Underlay(color.rgb, thickness_ldu=part.height_ldu),
             max_width=ICON_MAX_PX,
             max_height=ICON_MAX_PX,
             supersample=layout.supersample,
             background=background,
         )
-    content = RenderCell(color.rgb, part_id=0, has_stud=part.kind is not PartKind.TILE)
+    content = RenderCell(
+        color.rgb,
+        part_id=0,
+        has_stud=part.kind is not PartKind.TILE,
+        top_ldu=part.height_ldu,
+    )
     cells = {(row, col): content for row in range(area.rows) for col in range(area.cols)}
     return render_iso(
         cells,
         area,
         layout.view,
-        baseplate_rgb=None,
+        underlay=None,
         max_width=ICON_MAX_PX,
         max_height=ICON_MAX_PX,
         supersample=layout.supersample,
@@ -389,41 +526,6 @@ def render_part(
 
 
 # --- Blöcke und Seiten -----------------------------------------------------------------
-
-
-def _section_map(
-    mosaic: Mosaic, sections: Sequence[Section], layout: PageLayout, max_px: int
-) -> tuple[Block, int]:
-    """Kleine Draufsicht mit Abschnittsgrenzen und -nummern; liefert Bild und Noppengröße."""
-    stud_px = max(1, min(layout.max_stud_px, max_px // max(mosaic.width, mosaic.height)))
-    image = render_placements(
-        mosaic.placements,
-        region=Region(0, 0, mosaic.height, mosaic.width),
-        stud_px=stud_px,
-        draw_part_edges=False,
-    )
-    draw = ImageDraw.Draw(image)
-    font = layout.font(max(SMALL_SIZE, layout.section_studs * stud_px // 3))
-    for section in sections:
-        box = (
-            section.col * stud_px,
-            section.row * stud_px,
-            (section.col + section.cols) * stud_px - 1,
-            (section.row + section.rows) * stud_px - 1,
-        )
-        draw.rectangle(box, outline=WHITE, width=1)
-        center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
-        # stroke_*: weiße Schrift mit schwarzem Rand ist auf jeder Farbe lesbar
-        draw.text(
-            center,
-            str(section.number),
-            fill=WHITE,
-            font=font,
-            anchor="mm",
-            stroke_width=2,
-            stroke_fill=BLACK,
-        )
-    return image, stud_px
 
 
 def _overlaps(placement: Placement, area: Area) -> bool:

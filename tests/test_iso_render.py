@@ -8,6 +8,7 @@ from lego_mosaik.outputs.iso_render import (
     Area,
     IsoView,
     RenderCell,
+    Underlay,
     edge_color,
     render_iso,
 )
@@ -24,7 +25,7 @@ def _contains(image: Image.Image, rgb: tuple[int, int, int], tolerance: int = 6)
 
 def _small(cells: dict[tuple[int, int], RenderCell]) -> Image.Image:
     return render_iso(
-        cells, Area(0, 0, 2, 2), IsoView(), baseplate_rgb=None, max_width=200, max_height=200
+        cells, Area(0, 0, 2, 2), IsoView(), underlay=None, max_width=200, max_height=200
     )
 
 
@@ -47,7 +48,7 @@ def test_nearer_cells_are_drawn_later() -> None:
 def test_render_fits_requested_size() -> None:
     cells = {(0, col): RenderCell(RED, part_id=1) for col in range(4)}
     image = render_iso(
-        cells, Area(0, 0, 4, 4), IsoView(), baseplate_rgb=GRAY, max_width=300, max_height=300
+        cells, Area(0, 0, 4, 4), IsoView(), underlay=Underlay(GRAY), max_width=300, max_height=300
     )
     assert image.width <= 300 and image.height <= 300
     assert _contains(image, RED)
@@ -64,10 +65,10 @@ def test_highlighted_parts_get_orange_outline() -> None:
 def test_render_is_deterministic() -> None:
     cells = {(r, c): RenderCell(RED, part_id=r) for r in range(3) for c in range(3)}
     first = render_iso(
-        cells, Area(0, 0, 3, 3), IsoView(), baseplate_rgb=GRAY, max_width=200, max_height=200
+        cells, Area(0, 0, 3, 3), IsoView(), underlay=Underlay(GRAY), max_width=200, max_height=200
     )
     second = render_iso(
-        cells, Area(0, 0, 3, 3), IsoView(), baseplate_rgb=GRAY, max_width=200, max_height=200
+        cells, Area(0, 0, 3, 3), IsoView(), underlay=Underlay(GRAY), max_width=200, max_height=200
     )
     assert first.tobytes() == second.tobytes()
 
@@ -75,3 +76,31 @@ def test_render_is_deterministic() -> None:
 def test_edge_color_lightens_black() -> None:
     assert edge_color((5, 19, 29)) > (5, 19, 29)
     assert edge_color(RED) < RED
+
+
+def test_raised_cells_make_image_taller() -> None:
+    flat = {(r, c): RenderCell(RED, part_id=r) for r in range(2) for c in range(2)}
+    raised = {cell: RenderCell(RED, part_id=0, top_ldu=24) for cell in flat}
+    area = Area(0, 0, 2, 2)
+    low = render_iso(flat, area, IsoView(), underlay=None, max_width=400, max_height=400, scale=2)
+    high = render_iso(
+        raised, area, IsoView(), underlay=None, max_width=400, max_height=400, scale=2
+    )
+    assert high.height > low.height  # bei festem Maßstab braucht die höhere Säule mehr Platz
+
+
+def test_seams_are_drawn_between_panels() -> None:
+    area = Area(0, 0, 4, 4)
+    plain = render_iso(
+        {}, area, IsoView(), underlay=Underlay(GRAY, 32), max_width=200, max_height=200
+    )
+    seams = render_iso(
+        {},
+        area,
+        IsoView(),
+        underlay=Underlay(GRAY, 32, seam_studs=2),
+        max_width=200,
+        max_height=200,
+    )
+    assert plain.tobytes() != seams.tobytes()
+    assert _contains(seams, edge_color(GRAY))

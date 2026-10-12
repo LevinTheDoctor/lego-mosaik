@@ -34,9 +34,9 @@ class ResultJsonWriter:
 
 def build_result(mosaic: Mosaic) -> dict[str, object]:
     """Inhalt von ``ergebnis.json`` ohne Dateiliste (JSON-fähige Werte)."""
-    # Counter über alle Platzierungen: wie viele Noppen hat jede Farbe?
+    # Counter über die sichtbare Oberfläche: wie viele Noppen hat jede Farbe?
     studs_per_color = Counter[int]()
-    for placement in mosaic.placements:
+    for placement in mosaic.surface:
         studs_per_color[placement.color.id] += placement.part.area
     parts_list = PartsList.from_placements(mosaic.all_parts)
     return {

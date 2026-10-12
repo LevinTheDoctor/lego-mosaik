@@ -13,6 +13,7 @@ lazy import numpy.typing as npt
 
 from lego_mosaik.domain.errors import TilingError
 from lego_mosaik.domain.models import (
+    EMPTY_CELL,
     IndexGrid,
     LegoColor,
     PartCatalog,
@@ -54,10 +55,14 @@ class GreedyTiling:
     def tile(
         self, color_grid: IndexGrid, palette: Sequence[LegoColor], catalog: PartCatalog
     ) -> list[Placement]:
-        """Zerlegt das Raster zeilenweise von oben links nach unten rechts."""
+        """Zerlegt das Raster zeilenweise von oben links nach unten rechts.
+
+        Zellen mit ``EMPTY_CELL`` gelten von Anfang an als belegt und bleiben frei.
+        """
         validate_uniform_height(catalog, self._part_kinds)
         candidates = [self._candidates(catalog, color) for color in palette]
-        occupied = np.zeros(color_grid.shape, dtype=bool)
+        # Vergleich eines Arrays mit einer Zahl ergibt ein bool-Array derselben Form
+        occupied = color_grid == EMPTY_CELL
         placements: list[Placement] = []
         height, width = color_grid.shape
         for row in range(height):

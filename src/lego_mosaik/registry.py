@@ -86,6 +86,7 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
     "ldraw": lambda config: LdrawWriter(
         rows_per_step=config.ldraw.rows_per_step,
         section_studs=config.instructions.section_studs,
+        connector_depth_ldu=config.layout.connector_depth_ldu,
     ),
     "parts_list_csv": lambda config: PartsListCsvWriter(),
     "official_parts_lists": lambda config: OfficialPartsListsWriter(),

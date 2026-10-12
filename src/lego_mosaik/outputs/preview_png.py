@@ -26,9 +26,9 @@ class PreviewPngWriter:
         self._draw_part_edges = draw_part_edges
 
     def write(self, mosaic: Mosaic, target_dir: Path) -> Path:
-        """Zeichnet das Mosaik und speichert es als PNG."""
+        """Zeichnet die sichtbare Oberfläche (Rahmen und Bild) und speichert sie als PNG."""
         image = render_placements(
-            mosaic.placements,
+            mosaic.surface,
             region=Region(0, 0, mosaic.height, mosaic.width),
             stud_px=self._stud_px,
             draw_part_edges=self._draw_part_edges,

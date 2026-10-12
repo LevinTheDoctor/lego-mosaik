@@ -32,6 +32,36 @@ def test_create(cli: typer.Typer, image_file: Path) -> None:
     assert "mosaik.ldr" in result.output
 
 
+def test_create_with_art_panels_and_custom_size(cli: typer.Typer, image_file: Path) -> None:
+    result = runner.invoke(
+        cli,
+        [
+            "erstellen",
+            str(image_file),
+            "--unterbau",
+            "art",
+            "--unterbaufarbe",
+            "0",
+            "--breite",
+            "24",
+            "--rahmen-teile",
+            "tile",
+            "--rahmen-erhoehung",
+            "1",
+            "--eckenfarbe",
+            "15",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "24 × 24 Noppen" in result.output  # Höhe aus dem quadratischen Bild
+    assert "Technic-Pins" in result.output  # 2 × 2 Paneele sind verbunden
+
+
+def test_help_groups_options(cli: typer.Typer) -> None:
+    result = runner.invoke(cli, ["erstellen", "--hilfe"])
+    assert "Größe und Unterbau" in result.output and "Rahmen" in result.output
+
+
 def test_invalid_option_exit_code_2(cli: typer.Typer, image_file: Path) -> None:
     result = runner.invoke(cli, ["erstellen", str(image_file), "--platten", "zwei"])
     assert result.exit_code == 2
