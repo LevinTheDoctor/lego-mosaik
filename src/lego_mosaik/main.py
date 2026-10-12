@@ -1,21 +1,98 @@
 """Composition Root: einzige Stelle, an der konfiguriert und verdrahtet wird.
 
-Nur dieses Modul kennt die konkreten Klassen und übersetzt die Konfiguration in
-deren Konstruktorparameter. Alle anderen Module kennen nur Protocols und Domain.
-Die vollständige Konfiguration (``CONFIG``) und die Pipeline folgen mit der CLI.
+Wer etwas umstellen will (Größe, Teilarten, Farben, Verfahren, Ausgaben), ändert
+nur ``CONFIG``. CLI-Optionen und API-Felder überschreiben einzelne Werte nur für
+einen Lauf. Nur dieses Modul kennt die konkreten Klassen und übersetzt die
+Konfiguration in deren Konstruktorparameter (Dependency Injection).
 """
 
-import sys
+import functools
+from pathlib import Path
 
 lazy import httpx
 
-from lego_mosaik.config import SourceConfig
+from lego_mosaik.config import (
+    AppConfig,
+    DitheringConfig,
+    InstructionsConfig,
+    LayoutConfig,
+    LdrawConfig,
+    MosaicConfig,
+    PaletteConfig,
+    PreviewConfig,
+    ServerConfig,
+    SourceConfig,
+    TilingConfig,
+    validate_config,
+)
+from lego_mosaik.domain.models import ColorCategory, ColorDistance, FitMode, PartKind, Resampling
+from lego_mosaik.registry import (
+    DITHERERS,
+    OUTPUT_WRITERS,
+    TILING_STRATEGIES,
+    resolve,
+    validate_registry_names,
+)
+lazy from lego_mosaik.imaging.color_space import LabColorSpace
+lazy from lego_mosaik.imaging.preparer import PillowImagePreparer
+lazy from lego_mosaik.interfaces.cli import create_cli
+lazy from lego_mosaik.pipeline import MosaicPipeline, PipelineComponents
 lazy from lego_mosaik.sources.rebrickable_csv import RebrickableCsvSource
 lazy from lego_mosaik.sources.updater import CatalogUpdater
 
+CONFIG = AppConfig(
+    layout=LayoutConfig(
+        baseplate_studs=48,  # Grundplattengröße: 16, 32 oder 48 Noppen
+        plates_wide=1,  # Grundplatten nebeneinander
+        plates_high=1,  # Grundplatten untereinander → 48 × 48 Noppen
+        include_baseplate=True,  # Grundplatten in LDraw-Datei und Teilelisten
+        baseplate_color_id=71,  # Light Bluish Gray (Rebrickable-ID)
+        frame_width=1,  # Rahmen in Noppen (0 = ohne Rahmen)
+        frame_color_id=0,  # Black
+    ),
+    mosaic=MosaicConfig(
+        fit_mode=FitMode.CROP,  # CROP = mittig zuschneiden, PAD = einpassen mit Rand
+        pad_color_id=15,  # Randfarbe bei PAD und für Transparenz (15 = White)
+        resampling=Resampling.BOX,  # mittelt Flächen, gut für starkes Verkleinern
+        contrast=1.0,  # 1.0 = unverändert
+        saturation=1.0,  # 1.0 = unverändert
+    ),
+    palette=PaletteConfig(
+        part_kinds=(PartKind.PLATE, PartKind.TILE),  # erlaubt: PLATE, TILE oder nur BRICK
+        color_categories=(ColorCategory.SOLID,),  # exotische: METALLIC, PEARL, CHROME, …
+        include_color_ids=(),  # einzelne Farben trotz Kategorie erlauben
+        exclude_color_ids=(),  # Farben, die nie verwendet werden
+        max_colors=None,  # optional auf N häufigste Farben begrenzen
+    ),
+    dithering=DitheringConfig(
+        method="floyd_steinberg",  # Schlüssel aus der Registry (lego-mosaik verfahren)
+        strength=1.0,  # 0.0 = kein Fehlertransport, 1.0 = voll
+        color_distance=ColorDistance.CIEDE2000,  # oder CIE76 (schneller)
+        serpentine=True,  # Zeilen abwechselnd links/rechts abarbeiten
+        bayer_size=4,  # nur "ordered": 2, 4 oder 8
+        spread=32.0,  # nur "ordered": Stärke in RGB-Stufen
+    ),
+    tiling=TilingConfig(strategy="greedy", max_part_length=8),
+    outputs=(
+        "preview_png",
+        "ldraw",
+        "parts_list_csv",
+        "official_parts_lists",
+        "result_json",
+    ),
+    preview=PreviewConfig(stud_px=16, draw_part_edges=True),
+    ldraw=LdrawConfig(rows_per_step=4),
+    instructions=InstructionsConfig(section_studs=16, stud_px=32),
+    source=SourceConfig(data_dir=Path("daten/rebrickable"), max_age_days=7, auto_update=True),
+    output_dir=Path("ausgabe"),
+    server=ServerConfig(host="127.0.0.1", port=8000, max_upload_mb=20, update_interval_hours=24),
+)
 
+
+@functools.cache
 def build_catalog_source(source: SourceConfig) -> RebrickableCsvSource:
-    """Erzeugt die CSV-Datenquelle aus der Konfiguration."""
+    """Erzeugt die CSV-Datenquelle; ``functools.cache`` liefert pro Konfiguration
+    immer dieselbe Instanz, damit der geparste Katalog im Prozess gecacht bleibt."""
     return RebrickableCsvSource(
         data_dir=source.data_dir,
         geometry_file=source.geometry_file,
@@ -40,7 +117,45 @@ def build_updater(
     )
 
 
+def build_components(config: AppConfig) -> PipelineComponents:
+    """Steckt die konkreten Bausteine eines Laufs anhand der Konfiguration zusammen."""
+    return PipelineComponents(
+        image_preparer=PillowImagePreparer(
+            fit_mode=config.mosaic.fit_mode,
+            resampling=config.mosaic.resampling,
+            contrast=config.mosaic.contrast,
+            saturation=config.mosaic.saturation,
+        ),
+        color_space=LabColorSpace(config.dithering.color_distance),
+        ditherer=resolve(DITHERERS, config.dithering.method, "Dithering-Verfahren")(config),
+        tiler=resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(config),
+        writers=tuple(
+            resolve(OUTPUT_WRITERS, name, "Ausgabeformat")(config) for name in config.outputs
+        ),
+    )
+
+
+def build_pipeline(config: AppConfig) -> MosaicPipeline:
+    """Prüft die Konfiguration und baut die Pipeline mit allen Abhängigkeiten.
+
+    Raises:
+        ConfigError: Bei ungültigen Werten oder unbekannten Registry-Namen.
+    """
+    validate_config(config)
+    validate_registry_names(config)
+    return MosaicPipeline(
+        config,
+        catalog_source=build_catalog_source(config.source),
+        updater=build_updater(config.source),
+        component_factory=build_components,
+        method_names={
+            "Dithering": tuple(DITHERERS),
+            "Zerlegung": tuple(TILING_STRATEGIES),
+            "Ausgaben": tuple(OUTPUT_WRITERS),
+        },
+    )
+
+
 def run() -> None:
     """Entry Point aus pyproject.toml: startet die deutsche CLI."""
-    # sys.exit mit einem String gibt die Meldung auf stderr aus und beendet mit Code 1
-    sys.exit("Die CLI ist noch nicht implementiert.")
+    create_cli(CONFIG, build_pipeline)()

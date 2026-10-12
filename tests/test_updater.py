@@ -13,7 +13,7 @@ import pytest
 from lego_mosaik.config import SourceConfig
 from lego_mosaik.domain.errors import DownloadError
 from lego_mosaik.main import build_updater
-from lego_mosaik.sources.updater import FileStatus
+from lego_mosaik.sources.protocol import FileStatus
 
 NEW_CONTENT = b"id,name\n1,neu\n"
 OLD_CONTENT = gzip.compress(b"id,name\n1,alt\n")

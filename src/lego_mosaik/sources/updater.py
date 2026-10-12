@@ -10,13 +10,12 @@ import gzip
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
-from enum import StrEnum
+from datetime import UTC, datetime
 from pathlib import Path
 
 lazy import httpx
 
-from lego_mosaik.domain.errors import DownloadError
+from lego_mosaik.sources.protocol import FileInfo, FileStatus, FileUpdate, UpdateReport
 
 logger = logging.getLogger(__name__)
 
@@ -24,59 +23,6 @@ SECONDS_PER_DAY = 24 * 60 * 60
 TEMP_SUFFIX = ".tmp"
 # Größe der Blöcke beim Prüfen der gzip-Datei (1 MiB)
 READ_CHUNK_BYTES = 1024 * 1024
-
-
-class FileStatus(StrEnum):
-    """Ergebnis der Aktualisierung einer Datei."""
-
-    DOWNLOADED = "heruntergeladen"
-    UP_TO_DATE = "aktuell"
-    FAILED = "fehlgeschlagen"
-
-
-@dataclass(frozen=True, slots=True)
-class FileUpdate:
-    """Status einer einzelnen Datei nach der Aktualisierung.
-
-    Attributes:
-        file_name: Dateiname, z. B. ``colors.csv.gz``.
-        status: Was passiert ist.
-        message: Deutsche Erklärung (bei Fehlern der Grund).
-        usable: True, wenn danach eine (ggf. alte) Datei vorhanden ist.
-    """
-
-    file_name: str
-    status: FileStatus
-    message: str
-    usable: bool
-
-
-@dataclass(frozen=True, slots=True)
-class UpdateReport:
-    """Gesamtergebnis einer Aktualisierung."""
-
-    files: tuple[FileUpdate, ...]
-
-    @property
-    def downloaded_any(self) -> bool:
-        """True, wenn mindestens eine Datei neu geladen wurde."""
-        return any(update.status is FileStatus.DOWNLOADED for update in self.files)
-
-    @property
-    def failed(self) -> tuple[FileUpdate, ...]:
-        """Alle fehlgeschlagenen Dateien."""
-        return tuple(update for update in self.files if update.status is FileStatus.FAILED)
-
-    def raise_if_unusable(self) -> None:
-        """Bricht ab, wenn eine Datei weder neu geladen noch alt vorhanden ist.
-
-        Raises:
-            DownloadError: Mit den Gründen aller unbrauchbaren Dateien.
-        """
-        unusable = [update for update in self.files if not update.usable]
-        if unusable:
-            reasons = "; ".join(f"{update.file_name}: {update.message}" for update in unusable)
-            raise DownloadError(f"Teilekatalog nicht verfügbar. {reasons}")
 
 
 class CatalogUpdater:
@@ -111,6 +57,13 @@ class CatalogUpdater:
         self._timeout_seconds = timeout_seconds
         self._user_agent = user_agent
         self._transport = transport
+
+    def status(self) -> tuple[FileInfo, ...]:
+        """Stand der lokalen Dateien (Änderungszeit oder ``None``, wenn sie fehlen)."""
+        return tuple(
+            FileInfo(name, _modified(self._path(name)), self.needs_update(self._path(name)))
+            for name in self._file_names
+        )
 
     def needs_update(self, path: Path) -> bool:
         """True, wenn die Datei fehlt oder älter als ``max_age_days`` ist."""
@@ -170,6 +123,13 @@ class CatalogUpdater:
             logger.warning("Download von %s fehlgeschlagen: %s", file_name, message)
             return FileUpdate(file_name, FileStatus.FAILED, message, usable=target.exists())
         return FileUpdate(file_name, FileStatus.DOWNLOADED, "Neu heruntergeladen.", usable=True)
+
+
+def _modified(path: Path) -> datetime | None:
+    """Änderungszeit einer Datei in UTC, ``None`` wenn sie fehlt."""
+    if not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
 
 
 def _stream_to_file(client: httpx.Client, url: str, path: Path) -> None:

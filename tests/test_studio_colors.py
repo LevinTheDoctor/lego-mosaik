@@ -24,6 +24,9 @@ HEADER = (
 ROWS = (
     "11\t11\t0\t26\tBlack\tBlack\tBlack\tBlack\t#04121C\t1\tSolid Colors\n",
     "11\t\t0\t1012\tBlack\t\tBlack\tCONDUCT.Black\t#04121C\t1\tSolid Colors\n",
+    # Wie "Medium Nougat" in Studio: erste Zeile ohne BL-Code, die zweite mit
+    "6\t\t2\t209\tGreen\tGreen\tGreen\tAlt-Grün\t#237841\t1\tSolid Colors\n",
+    "6\t6\t2\t28\tGreen\tGreen\tGreen\tDark green\t#237841\t1\tSolid Colors\n",
     "7\t7\t1\t23\tBlue\tBlue\tBlue\tBright Blue\t#0054BE\t1\tSolid Colors\n",
     "5\t5\t104\t21\tRed\tRed\tRed\tBright red\t#C91A09\t1\tSolid Colors\n",
     "17\t17\t36\t41\tTrans-Red\tTrans-Red\tTrans_Red\tTr. Red\t#C91A09\t0.5\tTransparent Colors\n",
@@ -47,6 +50,7 @@ def test_name_matching_finds_ldraw_and_bricklink_codes(
     assert colors[4].ldraw_code == 104  # über den Namen "Red", nicht über die ID 4
     assert colors[1].lego_name == "Bright Blue"
     assert colors[36].category is ColorCategory.TRANSPARENT
+    assert (colors[2].bricklink_code, colors[2].lego_name) == (6, "Dark green")
 
 
 def test_unmatched_colors_get_no_ldraw_code(source_config: SourceConfig, studio_file: Path) -> None:

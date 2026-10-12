@@ -82,6 +82,24 @@ def require_baseplate_color(catalog: PartCatalog, baseplate: PartType, color_id:
     )
 
 
+def require_frame_color(
+    catalog: PartCatalog, color_id: int, part_kinds: Sequence[PartKind]
+) -> LegoColor:
+    """Prüft, dass sich der Rahmen in dieser Farbe legen lässt (1×1-Teil vorhanden).
+
+    Raises:
+        ConfigError: Wenn die Farbe unbekannt ist, keinen LDraw-Code hat oder kein
+            1×1-Teil der erlaubten Teilarten in ihr existiert.
+    """
+    color = catalog.colors.get(color_id)
+    if color is None or color.ldraw_code is None:
+        raise ConfigError(f"Die Rahmenfarbe {color_id} ist unbekannt.")
+    if not any(part.is_single_stud for part in catalog.parts_in_color(color_id, part_kinds)):
+        kinds = ", ".join(kind.value for kind in part_kinds)
+        raise ConfigError(f"Für die Rahmenfarbe {color.name} gibt es kein 1×1-Teil ({kinds}).")
+    return color
+
+
 def baseplate_placements(
     baseplate: PartType, color: LegoColor, plates_wide: int, plates_high: int
 ) -> tuple[Placement, ...]:

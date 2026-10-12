@@ -6,7 +6,8 @@ einzige Stelle, an der Eingaben aus CLI und API geprüft und angewendet werden.
 """
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 
 from lego_mosaik.domain.errors import ConfigError
@@ -352,6 +353,33 @@ def _check_unique_non_empty(label: str, values: tuple[str, ...]) -> None:
     # Ein set enthält jedes Element nur einmal; ist es kürzer als die Liste, gab es Duplikate
     if len(set(values)) != len(values):
         raise ConfigError(f"{label}: Jeder Wert darf nur einmal vorkommen ({_join(values)}).")
+
+
+def config_to_dict(config: AppConfig) -> dict[str, object]:
+    """Wandelt die Konfiguration in JSON-fähige Werte um (für ``ergebnis.json``).
+
+    ``asdict`` macht aus verschachtelten Dataclasses verschachtelte dicts; Pfade,
+    Enums und Tupel wandelt ``_to_json`` anschließend rekursiv um.
+    """
+    result = _to_json(asdict(config))
+    assert isinstance(result, dict)  # asdict liefert immer ein dict
+    return result
+
+
+def _to_json(value: object) -> object:
+    """Rekursive Umwandlung: Path → str, Enum → Wert, Tupel/Listen → Listen."""
+    # match/case (Structural Pattern Matching): wählt den Zweig nach dem Typ des Werts
+    match value:
+        case dict():
+            return {str(key): _to_json(item) for key, item in value.items()}
+        case tuple() | list():
+            return [_to_json(item) for item in value]
+        case Path():
+            return str(value)
+        case Enum():
+            return value.value
+        case _:
+            return value
 
 
 # --- Eingaben aus Text parsen (gemeinsam für CLI und API) -------------------------

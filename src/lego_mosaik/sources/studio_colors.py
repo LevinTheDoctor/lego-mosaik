@@ -56,11 +56,10 @@ class StudioColorTable:
         self._by_ldraw_name: dict[str, StudioColor] = {}
         self._by_code: dict[int, StudioColor] = {}
         for bl_name, ldraw_name, color in rows:
-            # setdefault behält den ersten Eintrag; Studio listet die Hauptzeile zuerst
             if bl_name:
-                self._by_bl_name.setdefault(normalize_color_name(bl_name), color)
-            self._by_ldraw_name.setdefault(normalize_color_name(ldraw_name), color)
-            self._by_code.setdefault(color.ldraw_code, color)
+                _remember(self._by_bl_name, normalize_color_name(bl_name), color)
+            _remember(self._by_ldraw_name, normalize_color_name(ldraw_name), color)
+            _remember(self._by_code, color.ldraw_code, color)
 
     def find_by_name(self, rebrickable_name: str) -> StudioColor | None:
         """Sucht zuerst über den BrickLink-Namen, dann über den LDraw-Namen."""
@@ -70,6 +69,16 @@ class StudioColorTable:
     def find_by_code(self, ldraw_code: int) -> StudioColor | None:
         """Sucht über den LDraw-Code (z. B. nach einem Override)."""
         return self._by_code.get(ldraw_code)
+
+
+def _remember[K](table: dict[K, StudioColor], key: K, color: StudioColor) -> None:
+    """Merkt sich die erste Zeile je Schlüssel, bevorzugt aber Zeilen mit BrickLink-Code.
+
+    Studio führt manche Farben mehrfach (z. B. alte LEGO-Farbvarianten ohne BrickLink-Code).
+    """
+    existing = table.get(key)
+    if existing is None or (existing.bricklink_code is None and color.bricklink_code is not None):
+        table[key] = color
 
 
 def normalize_color_name(name: str) -> str:

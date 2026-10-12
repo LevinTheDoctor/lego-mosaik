@@ -16,13 +16,17 @@ Trans-Red  36    Plate 1×1                              raus: transparent
 """
 
 import csv
+import dataclasses
 import gzip
 from collections.abc import Iterable, Sequence
+from datetime import datetime
 from pathlib import Path
 
+import httpx
 import numpy as np
 import numpy.typing as npt
 import pytest
+from PIL import Image
 
 from lego_mosaik.config import (
     AppConfig,
@@ -34,6 +38,9 @@ from lego_mosaik.config import (
     TilingConfig,
 )
 from lego_mosaik.domain.models import ColorCategory, LegoColor, PartCatalog, PartKind, PartType
+from lego_mosaik.main import build_catalog_source, build_components, build_updater
+from lego_mosaik.pipeline import MosaicPipeline
+from lego_mosaik.registry import DITHERERS
 
 # (id, name, rgb_hex, is_trans) – wie in Rebrickables colors.csv
 COLOR_ROWS: tuple[tuple[int, str, str, bool], ...] = (
@@ -249,3 +256,48 @@ def color_blocks(size: int = 8) -> RgbArray:
     image[:half, half:] = (0, 85, 191)  # Blue
     image[half:, :half] = (255, 255, 255)  # White
     return image
+
+
+# --- Pipeline-Fixtures -------------------------------------------------------------
+
+FIXED_NOW = datetime(2026, 10, 12, 14, 30, 5)
+
+
+def _offline_transport() -> httpx.MockTransport:
+    """Transport, der jede Anfrage ablehnt: Tests dürfen nie ins Netz."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Tests laufen offline", request=request)
+
+    return httpx.MockTransport(refuse)
+
+
+@pytest.fixture
+def pipeline_config(app_config: AppConfig, source_config: SourceConfig) -> AppConfig:
+    """Konfiguration mit Mini-Katalog, 16er-Grundplatte (White) und allen Ausgaben."""
+    return dataclasses.replace(
+        app_config,
+        source=source_config,
+        layout=dataclasses.replace(app_config.layout, baseplate_color_id=15),
+        outputs=("preview_png", "ldraw", "parts_list_csv", "official_parts_lists", "result_json"),
+    )
+
+
+def make_pipeline(config: AppConfig) -> MosaicPipeline:
+    """Pipeline wie in main.build_pipeline, aber offline und mit fester Uhr."""
+    return MosaicPipeline(
+        config,
+        catalog_source=build_catalog_source(config.source),
+        updater=build_updater(config.source, transport=_offline_transport()),
+        component_factory=build_components,
+        method_names={"Dithering": tuple(DITHERERS)},
+        now=lambda: FIXED_NOW,
+    )
+
+
+@pytest.fixture
+def image_file(tmp_path: Path) -> Path:
+    """PNG mit vier Farbquadranten (32 × 32 Pixel)."""
+    path = tmp_path / "bild.png"
+    Image.fromarray(color_blocks(32)).save(path)
+    return path
