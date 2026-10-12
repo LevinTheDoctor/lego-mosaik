@@ -41,6 +41,8 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "N", "RUF"]
+# Deutsche Texte nutzen bewusst typografische Zeichen wie × (z. B. 48 × 48) und –
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.15"
