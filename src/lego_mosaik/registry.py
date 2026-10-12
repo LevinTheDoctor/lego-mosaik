@@ -28,7 +28,9 @@ lazy from lego_mosaik.dithering.ordered import OrderedDitherer
 lazy from lego_mosaik.dithering.protocol import Ditherer
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
 lazy from lego_mosaik.outputs.protocol import OutputWriter
+lazy from lego_mosaik.tiling.greedy import GreedyTiling
 lazy from lego_mosaik.tiling.protocol import TilingStrategy
+lazy from lego_mosaik.tiling.single_stud import SingleStudTiling
 
 # Typ-Aliase für die Fabrikfunktionen: Callable[[Argumenttypen], Rückgabetyp]
 type DithererFactory = Callable[[AppConfig], Ditherer]
@@ -65,7 +67,10 @@ DITHERERS: dict[str, DithererFactory] = {
     ),
 }
 
-TILING_STRATEGIES: dict[str, TilingFactory] = {}
+TILING_STRATEGIES: dict[str, TilingFactory] = {
+    "single_stud": lambda config: SingleStudTiling(config.palette.part_kinds),
+    "greedy": lambda config: GreedyTiling(config.palette.part_kinds, config.tiling.max_part_length),
+}
 
 OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {}
 

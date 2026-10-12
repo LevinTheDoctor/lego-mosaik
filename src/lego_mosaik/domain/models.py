@@ -283,3 +283,28 @@ class PartsList:
 def _parts_list_sort_key(entry: PartsListEntry) -> tuple[int, str]:
     """Sortierschlüssel: Tupel werden elementweise verglichen, also erst Farbe, dann Teil."""
     return entry.color.id, entry.part.part_num
+
+
+@dataclass(frozen=True, slots=True)
+class TilingStats:
+    """Kennzahlen der Zerlegung.
+
+    Attributes:
+        pixels: Anzahl Noppen (Breite × Höhe).
+        parts: Anzahl verwendeter Teile.
+        savings_percent: Ersparnis gegenüber lauter 1×1-Teilen in Prozent.
+    """
+
+    pixels: int
+    parts: int
+    savings_percent: float
+
+    @classmethod
+    def from_placements(
+        cls, width: int, height: int, placements: Iterable[Placement]
+    ) -> TilingStats:
+        """Berechnet die Kennzahlen aus den Platzierungen."""
+        pixels = width * height
+        parts = sum(1 for _ in placements)  # zählt auch Generatoren, nicht nur Listen
+        savings = (1 - parts / pixels) * 100 if pixels else 0.0
+        return cls(pixels=pixels, parts=parts, savings_percent=round(savings, 1))
