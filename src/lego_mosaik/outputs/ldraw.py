@@ -7,12 +7,11 @@ Bildspalten entlang +x.
 
 import logging
 from collections.abc import Sequence
-from itertools import groupby
 from pathlib import Path
 
 from lego_mosaik.domain.errors import CatalogError
 from lego_mosaik.domain.models import PLATE_HEIGHT_LDU, LegoColor, LongAxis, Mosaic, Placement
-from lego_mosaik.domain.sections import section_index
+from lego_mosaik.domain.sections import build_steps
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +21,6 @@ LAYER_Y = 0  # alle Teile in einer Lage
 # Rotationsmatrizen (zeilenweise a b c d e f g h i)
 IDENTITY = (1, 0, 0, 0, 1, 0, 0, 0, 1)
 ROTATE_Y_90 = (0, 0, 1, 0, 1, 0, -1, 0, 0)  # 90° um die y-Achse: x → z
-type StepKey = tuple[int, int]
-"""(Abschnittsindex, Zeilenblock innerhalb des Abschnitts)."""
-
 # Grundplatten liegen unter der Mosaiklage: Ihre Oberkante (Ursprung der LDraw-Datei)
 # trifft die Unterkante der Plates, also eine Plate-Höhe tiefer (+y = nach unten)
 BASEPLATE_Y = PLATE_HEIGHT_LDU
@@ -65,15 +61,19 @@ def ldraw_lines(mosaic: Mosaic, rows_per_step: int, section_studs: int) -> list[
         lines.append("0 // Grundplatten")
         lines += [placement_line(plate, y=BASEPLATE_Y) for plate in mosaic.baseplates]
         lines.append("0 STEP")
-    steps = group_steps(
-        mosaic.placements, rows_per_step, width=mosaic.width, section_studs=section_studs
+    steps = build_steps(
+        mosaic.placements,
+        width=mosaic.width,
+        height=mosaic.height,
+        section_studs=section_studs,
+        rows_per_step=rows_per_step,
     )
-    previous_section = -1
-    for (section, _), step in steps:
-        if section != previous_section:
-            lines.append(f"0 // Abschnitt {section + 1}")
-            previous_section = section
-        lines += [placement_line(placement) for placement in step]
+    previous_section = 0
+    for step in steps:
+        if step.section.number != previous_section:
+            lines.append(f"0 // Abschnitt {step.section.number}")
+            previous_section = step.section.number
+        lines += [placement_line(placement) for placement in step.placements]
         lines.append("0 STEP")
     return lines
 
@@ -86,31 +86,6 @@ def header_lines(title: str) -> list[str]:
         "0 Author: lego-mosaik",
         "0 !LDRAW_ORG Unofficial_Model",
     ]
-
-
-def group_steps(
-    placements: Sequence[Placement], rows_per_step: int, *, width: int, section_studs: int
-) -> list[tuple[StepKey, list[Placement]]]:
-    """Teilt die Teile in Bauschritte: erst nach Abschnitt, darin nach Zeilenblöcken.
-
-    Ein Teil gehört zum Abschnitt und Zeilenblock seiner Startzelle. Innerhalb eines
-    Schritts wird nach Farbe, dann Position sortiert, damit man eine Farbe nach der
-    anderen verbauen kann. Leere Schritte entfallen. Die Abschnitte entsprechen den
-    Seiten der Bauanleitung.
-    """
-
-    def step_key(placement: Placement) -> StepKey:
-        section = section_index(placement.row, placement.col, width, section_studs)
-        # % ist der Rest der Division: Zeile innerhalb des Abschnitts; // teilt in Blöcke
-        return section, (placement.row % section_studs) // rows_per_step
-
-    def sort_key(placement: Placement) -> tuple[int, int, int, int, int]:
-        return (*step_key(placement), placement.color.id, placement.row, placement.col)
-
-    ordered = sorted(placements, key=sort_key)
-    # groupby fasst aufeinanderfolgende Elemente mit gleichem Schlüssel zusammen
-    # (funktioniert nur, weil vorher nach demselben Schlüssel sortiert wurde)
-    return [(key, list(group)) for key, group in groupby(ordered, key=step_key)]
 
 
 def placement_line(placement: Placement, *, y: float = LAYER_Y) -> str:

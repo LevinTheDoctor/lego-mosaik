@@ -10,7 +10,7 @@ Lokaler Service, der aus einem Bild ein **baubares LEGO-Mosaik aus echten Teilen
    - Vorschau
    - LDraw-Datei für Bricklink Studio
    - Teilelisten (BrickLink, Rebrickable, LEGO)
-   - Bauanleitung als PDF
+   - Bauanleitung im LEGO-Stil als PDF, mit 3D-Renderbildern pro Bauschritt
 
 Bedienung über eine deutsche Kommandozeile oder eine lokale HTTP-API. Beide nutzen dieselbe Pipeline.
 
@@ -85,7 +85,7 @@ Alle Standardwerte stehen **an einer Stelle**: `CONFIG` in `src/lego_mosaik/main
 | `dithering` | `floyd_steinberg`, Stärke 1.0, CIEDE2000, Serpentine |
 | `tiling` | `greedy`, längste Teilseite 8, Zerlegung pro Abschnitt |
 | `outputs` | `preview_png`, `ldraw`, `parts_list_csv`, `official_parts_lists`, `instructions_png`, `result_json` |
-| `instructions` | Abschnitte 16 × 16, A4-Seiten, Schriftenliste |
+| `instructions` | Abschnitte 16 × 16, A4-Seiten, Kamera (60° Höhe, 0° Drehung), Größe der Schrittansicht, Schriftenliste |
 | `source` | Rebrickable-URL, Höchstalter 7 Tage, automatische Aktualisierung, Pfad zur Studio-Farbtabelle |
 | `server` | `127.0.0.1:8000`, Upload bis 20 MB, Katalogprüfung alle 24 h |
 
@@ -108,22 +108,34 @@ Jeder Lauf schreibt in einen eigenen Ordner, z. B. `ausgabe/2026-10-12_143005_ka
 | `ldraw` | `mosaik.ldr` | Modell für Bricklink Studio, Bauschritte je Abschnitt |
 | `parts_list_csv` | `teileliste.csv`, `teileliste_rebrickable.csv` | Eigene Liste (Semikolon, für Excel) und Rebrickable-Import |
 | `official_parts_lists` | `teileliste_bricklink.xml`, `teileliste_lego.csv` | BrickLink Wanted List und Liste mit LEGO-Element-IDs |
-| `instructions_png` | `anleitung_01.png` …, `anleitung.pdf` | Übersicht, Farbliste, eine Seite pro 16 × 16-Abschnitt |
+| `instructions_png` | `anleitung_01.png` …, `anleitung.pdf` | Bauanleitung im LEGO-Stil mit 3D-Renderbildern (siehe unten) |
 | `result_json` | `ergebnis.json` | Konfiguration, Statistik, Palette, Dateiliste |
 
-## Bricklink Studio: Import und gerenderte Anleitung
+## Bauanleitung
 
-Studio hat keine Kommandozeile. Die gerenderte PDF-Anleitung entsteht deshalb per Klick:
+`anleitung.pdf` entsteht vollautomatisch und ohne externe Programme. Gerendert wird mit einem eigenen kleinen 3D-Renderer auf Basis von Pillow (`outputs/iso_render.py`):
 
-1. Studio öffnen und `mosaik.ldr` über *File › Import › Import Model …* laden (oder direkt öffnen).
-2. In den Instruction-Modus wechseln: Button *Instruction* in der Mitte der Werkzeugleiste oder *Tool › Instruction Maker*.
-3. Im *Step Editor* die Bauschritte prüfen. Schritt 1 sind die Grundplatten, danach folgt pro Abschnitt (16 × 16) ein Schritt je vier Zeilen.
-   > Bitte beim ersten Import prüfen, ob Studio die `0 STEP`-Zeilen als Schritte übernimmt. Die Studio-Doku sagt dazu nichts Verbindliches.
-4. In *Page Design* das Layout anpassen und über *Export* oben rechts als PDF speichern. Bei großen Modellen kann man im Bereich *Pages* nur einen Teil der Seiten exportieren.
+1. **Titelseite:** das fertige Mosaik in 3D, Kennzahlen und eine Karte der Abschnitte
+2. **Teileübersicht:** alle Teile als gerenderte Einzelteile mit Stückzahl und Farbname
+3. **Schritt 1:** Grundplatten auslegen
+4. **Ab Schritt 2, pro Bauschritt** (einige Zeilen eines 16 × 16-Abschnitts):
+   - großer Schrittzähler
+   - hellblauer Teile-Kasten („3×“ unter jedem Teilbild)
+   - 3D-Ansicht des Abschnitts, in der die neuen Teile orange umrandet sind
 
-Zusätzlich erzeugt der Service immer eine eigene `anleitung.pdf`, ganz ohne Studio. Ihre Abschnitte haben dieselbe Reihenfolge wie die Bauschritte in `mosaik.ldr`.
+   Jeder Abschnitt beginnt auf einer neuen Seite, mit einer Karte, wo er im Mosaik liegt.
 
-Zur Ausrichtung: `scripts/orientierung.py` erzeugt ein kleines Testmodell (`ausgabe/orientierung/`), das man mit der beiliegenden Vorschau vergleichen kann. `scripts/ldraw_achsen_pruefen.py` prüft die Teileausrichtung automatisch gegen die LDraw-Bibliothek von Studio.
+**Kamera:** Sie schaut gerade von vorne und steil von oben (wie bei LEGO Art). Zeilen und Spalten bleiben dadurch gerade und abzählbar. Einstellbar ist das über `view_elevation_deg` und `view_azimuth_deg` in `CONFIG.instructions`: Ein Azimut über 0° dreht die Ansicht und zeigt zusätzlich die Seitenflächen.
+
+**Farben:** Bereits gebaute Teile behalten ihre echte Farbe. Ausgeblasste Farben würden wie andere LEGO-Farben aussehen.
+
+**Schritte:** Die Bauschritte sind exakt dieselben wie in `mosaik.ldr`.
+
+### Optional: Bricklink Studio
+
+`mosaik.ldr` lässt sich in Studio über *File › Import › Import Model …* öffnen. Studio übernimmt die Bauschritte. Im Instruction-Modus (Button *Instruction* bzw. *Tool › Instruction Maker*) kann man daraus ebenfalls ein PDF exportieren (*Export* oben rechts). Die eigene Anleitung ist dafür aber nicht nötig.
+
+Zur Ausrichtung: `scripts/orientierung.py` erzeugt ein kleines Testmodell (`ausgabe/orientierung/`). `scripts/ldraw_achsen_pruefen.py` prüft die Teileausrichtung automatisch gegen die LDraw-Bibliothek von Studio.
 
 ## Teile bestellen
 
@@ -208,7 +220,7 @@ src/lego_mosaik/
 ├── imaging/           Laden, Einpassen, Farbraum Lab, Farbsuche (+ protocol.py)
 ├── dithering/         nearest, error_diffusion (Floyd-Steinberg, Atkinson, Sierra Lite), ordered
 ├── tiling/            single_stud, greedy (+ protocol.py)
-├── outputs/           Vorschau, LDraw, Teilelisten, offizielle Listen, Anleitung, Ergebnis-JSON
+├── outputs/           Vorschau, LDraw, Teilelisten, offizielle Listen, 3D-Renderer, Anleitung, JSON
 └── interfaces/        cli.py (Typer), api.py (FastAPI)
 ```
 
@@ -228,6 +240,8 @@ src/lego_mosaik/
 - Registry + Factory: `registry.py`
 - Protocol (strukturelle Typisierung)
 - Facade: `PillowImagePreparer`
+- Builder: Anleitung aus Einheiten zusammensetzen, die nie über Seiten getrennt werden
+- Painter's Algorithm: 3D-Verdeckung durch Zeichnen von hinten nach vorne
 - Dependency Injection: Konstruktorparameter statt Konfigurationsobjekt
 - Context Manager: Zeitmessung pro Schritt
 

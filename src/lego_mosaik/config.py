@@ -149,7 +149,13 @@ class InstructionsConfig:
     page_width_px: int = 1240
     page_height_px: int = 1754
     margin_px: int = 60
-    max_stud_px: int = 48  # größte Noppe auf den Abschnittsseiten
+    max_stud_px: int = 48  # größte Noppe auf der Abschnittskarte
+    # Kamera der 3D-Ansichten: gerade von vorne, steil von oben (wie LEGO Art);
+    # Zeilen und Spalten bleiben abzählbar. Drehung > 0 zeigt zusätzlich Seitenflächen.
+    view_elevation_deg: float = 60.0
+    view_azimuth_deg: float = 0.0
+    supersample: int = 2  # intern größer rendern und verkleinern (glatte Kanten)
+    step_render_height_px: int = 820  # Höhe einer Schrittansicht in Pixeln
     # TrueType-Schriften mit Umlauten; die erste vorhandene wird genutzt.
     # Pillows eingebaute Schrift kann weder ä/ö/ü noch × und –.
     font_paths: tuple[Path, ...] = (
@@ -313,6 +319,9 @@ def validate_config(config: AppConfig) -> None:
     _check_range("Noppengröße der Vorschau", config.preview.stud_px, 1, MAX_STUDS)
     _check_range("Abschnittsgröße der Anleitung", config.instructions.section_studs, 1, MAX_STUDS)
     _check_range("Noppengröße der Anleitung", config.instructions.max_stud_px, 4, MAX_STUDS)
+    _check_range("Kamera-Höhenwinkel", config.instructions.view_elevation_deg, 10.0, 90.0, "Grad")
+    _check_range("Kamera-Drehung", config.instructions.view_azimuth_deg, 0.0, 45.0, "Grad")
+    _check_range("Supersampling", config.instructions.supersample, 1, 4)
     _check_range("Port", config.server.port, MIN_PORT, MAX_PORT)
     _check_range("Upload-Grenze", config.server.max_upload_mb, 1, 1024, "MB")
 

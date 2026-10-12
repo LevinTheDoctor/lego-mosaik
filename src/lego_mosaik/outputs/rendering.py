@@ -1,9 +1,9 @@
 """Gemeinsames Zeichnen von Mosaiken (Vorschau und Bauanleitung)."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-lazy from PIL import Image, ImageDraw, ImageFont
+lazy from PIL import Image, ImageDraw
 
 from lego_mosaik.domain.models import Placement, RgbTuple
 
@@ -20,10 +20,6 @@ MIN_HIGHLIGHT = 48  # Mindesthelligkeit des Noppenkreises auf sehr dunklen Farbe
 # Gewichte für die wahrgenommene Helligkeit (ITU-R BT.601): Grün wirkt am hellsten
 LUMA_WEIGHTS = (0.299, 0.587, 0.114)
 RGB_MAX = 255
-LABEL_SIZE_RATIO = 0.4  # Schriftgröße der Farbkennung relativ zur Noppengröße
-MIN_LABEL_STUD_PX = 14  # darunter wären Kennungen unlesbar und werden weggelassen
-DARK_TEXT: RgbTuple = (0, 0, 0)
-LIGHT_TEXT: RgbTuple = (255, 255, 255)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +38,6 @@ def render_placements(
     region: Region,
     stud_px: int,
     draw_part_edges: bool,
-    labels: Mapping[int, str] | None = None,
 ) -> Image.Image:
     """Zeichnet Teile als Noppen-Quadrate mit angedeutetem Noppenkreis.
 
@@ -51,11 +46,9 @@ def render_placements(
         region: Der zu zeichnende Ausschnitt; Zellen außerhalb werden übersprungen.
         stud_px: Kantenlänge einer Noppe in Pixeln.
         draw_part_edges: Umrisse der Teile als Linien einzeichnen.
-        labels: Optional Farb-ID → Kennung (z. B. "A"), die in jede Noppe geschrieben wird.
     """
     image = Image.new("RGB", (region.cols * stud_px, region.rows * stud_px), EMPTY_CELL_RGB)
     draw = ImageDraw.Draw(image)
-    font = _label_font(stud_px) if labels else None
     placements = list(placements)  # wird zweimal durchlaufen, daher in eine Liste
     for placement in placements:
         for row, col in placement.cells():
@@ -65,10 +58,6 @@ def render_placements(
             ):
                 cell = (row - region.row, col - region.col)
                 _draw_stud(draw, *cell, stud_px, placement.color.rgb)
-                if font is not None and labels is not None:
-                    _draw_label(
-                        draw, *cell, stud_px, placement.color.rgb, labels[placement.color.id], font
-                    )
     if draw_part_edges:
         for placement in placements:
             draw.rectangle(part_box(placement, stud_px, region), outline=EDGE_RGB)
@@ -84,33 +73,6 @@ def part_box(
     right = left + placement.cols_spanned * stud_px - 1
     bottom = top + placement.rows_spanned * stud_px - 1
     return left, top, right, bottom
-
-
-def _label_font(stud_px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont | None:
-    """Schrift für Farbkennungen; bei zu kleinen Noppen gibt es keine Kennungen."""
-    if stud_px < MIN_LABEL_STUD_PX:
-        return None
-    return ImageFont.load_default(size=round(stud_px * LABEL_SIZE_RATIO))
-
-
-def _draw_label(
-    draw: ImageDraw.ImageDraw,
-    row: int,
-    col: int,
-    stud_px: int,
-    rgb: RgbTuple,
-    text: str,
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-) -> None:
-    """Schreibt die Kennung mittig in die Zelle, schwarz auf hell bzw. weiß auf dunkel."""
-    center = (col * stud_px + stud_px / 2, row * stud_px + stud_px / 2)
-    # anchor="mm": Text wird horizontal und vertikal mittig am Punkt ausgerichtet
-    draw.text(center, text, fill=text_color(rgb), font=font, anchor="mm")
-
-
-def text_color(rgb: RgbTuple) -> RgbTuple:
-    """Lesbare Schriftfarbe auf dem Hintergrund ``rgb``."""
-    return DARK_TEXT if _luma(rgb) >= LIGHT_THRESHOLD else LIGHT_TEXT
 
 
 def _luma(rgb: RgbTuple) -> float:

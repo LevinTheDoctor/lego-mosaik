@@ -28,6 +28,7 @@ lazy from lego_mosaik.dithering.ordered import OrderedDitherer
 lazy from lego_mosaik.dithering.protocol import Ditherer
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
 lazy from lego_mosaik.outputs.instructions_png import InstructionsWriter, PageLayout
+lazy from lego_mosaik.outputs.iso_render import IsoView
 lazy from lego_mosaik.outputs.ldraw import LdrawWriter
 lazy from lego_mosaik.outputs.official_parts_lists import OfficialPartsListsWriter
 lazy from lego_mosaik.outputs.parts_list_csv import PartsListCsvWriter
@@ -95,6 +96,13 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
             margin=config.instructions.margin_px,
             max_stud_px=config.instructions.max_stud_px,
             section_studs=config.instructions.section_studs,
+            rows_per_step=config.ldraw.rows_per_step,  # dieselben Schritte wie in mosaik.ldr
+            view=IsoView(
+                elevation_deg=config.instructions.view_elevation_deg,
+                azimuth_deg=config.instructions.view_azimuth_deg,
+            ),
+            supersample=config.instructions.supersample,
+            step_render_height=config.instructions.step_render_height_px,
             font_paths=config.instructions.font_paths,
         )
     ),

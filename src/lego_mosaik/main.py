@@ -86,7 +86,12 @@ CONFIG = AppConfig(
     ),
     preview=PreviewConfig(stud_px=16, draw_part_edges=True),
     ldraw=LdrawConfig(rows_per_step=4),
-    instructions=InstructionsConfig(section_studs=16, max_stud_px=48),  # 16 × 16 wie LEGO Art
+    instructions=InstructionsConfig(
+        section_studs=16,  # Bauabschnitte 16 × 16 wie bei LEGO Art
+        view_elevation_deg=60.0,  # Kamera: Höhenwinkel der 3D-Ansichten
+        view_azimuth_deg=0.0,  # Kamera: 0 = gerade von vorne (Zeilen bleiben abzählbar)
+        step_render_height_px=820,  # Größe der Schrittansicht
+    ),
     source=SourceConfig(data_dir=Path("daten/rebrickable"), max_age_days=7, auto_update=True),
     output_dir=Path("ausgabe"),
     server=ServerConfig(host="127.0.0.1", port=8000, max_upload_mb=20, update_interval_hours=24),
