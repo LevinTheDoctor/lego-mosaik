@@ -15,6 +15,9 @@ Trans-Red  36    Plate 1×1                              raus: transparent
 =========  ====  =====================================  =============================
 """
 
+import csv
+import gzip
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import pytest
@@ -86,8 +89,81 @@ def make_catalog() -> PartCatalog:
         part_num: PartType(part_num, name, kind, width, length, f"{part_num}.dat", height)
         for part_num, name, kind, width, length, height in PART_ROWS
     }
-    element_ids = {combo: f"{index + 300000}" for index, combo in enumerate(AVAILABLE)}
+    element_ids = {combo: _element_id(index) for index, combo in enumerate(AVAILABLE)}
     return PartCatalog(colors, part_types, frozenset(AVAILABLE), element_ids)
+
+
+def _element_id(index: int) -> str:
+    """Element-ID der index-ten verfügbaren Kombination (deterministisch)."""
+    return str(300000 + index)
+
+
+def write_csv(
+    path: Path, header: Sequence[str], rows: Iterable[Sequence[object]], *, compressed: bool
+) -> None:
+    """Schreibt eine CSV-Datei, wahlweise gzip-komprimiert wie bei Rebrickable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    opener = gzip.open if compressed else open
+    with opener(path, "wt", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def write_rebrickable_dumps(data_dir: Path) -> None:
+    """Schreibt Mini-Versionen von colors/parts/elements.csv.gz.
+
+    Enthält absichtlich Störfälle: Sonderfarben -1/9999, zusätzliche Spalten,
+    einen Teilnamen mit Komma, ein Teil außerhalb der Whitelist und doppelte
+    Element-IDs (die kleinste muss gewinnen).
+    """
+    color_rows = [(-1, "[Unknown]", "0033B2", "False", 1), (9999, "[No Color]", "05131D", "f", 1)]
+    color_rows += [(cid, name, rgb, str(trans), 7) for cid, name, rgb, trans in COLOR_ROWS]
+    write_csv(
+        data_dir / "colors.csv.gz",
+        ("id", "name", "rgb", "is_trans", "num_parts"),
+        color_rows,
+        compressed=True,
+    )
+    part_rows = [(num, name, 14, "Plastic") for num, name, *_ in PART_ROWS]
+    part_rows.append(("9999x", "Brick, Modified 1 x 2", 11, "Plastic"))
+    write_csv(
+        data_dir / "parts.csv.gz",
+        ("part_num", "name", "part_cat_id", "part_material"),
+        part_rows,
+        compressed=True,
+    )
+    element_rows = [(_element_id(i), num, cid, "") for i, (num, cid) in enumerate(AVAILABLE)]
+    element_rows += [("9900001", "3024", 0, ""), ("4211", "9999x", 0, "")]
+    write_csv(
+        data_dir / "elements.csv.gz",
+        ("element_id", "part_num", "color_id", "design_id"),
+        element_rows,
+        compressed=True,
+    )
+
+
+def write_geometry(path: Path) -> None:
+    """Schreibt eine Mini-``teil_geometrie.csv`` passend zu ``PART_ROWS``."""
+    header = ("part_num", "kind", "width_studs", "length_studs", "ldraw_file", "height_ldu")
+    rows = [
+        (num, kind.value, w, length, f"{num}.dat", h) for num, _, kind, w, length, h in PART_ROWS
+    ]
+    write_csv(path, header, rows, compressed=False)
+
+
+@pytest.fixture
+def source_config(tmp_path: Path) -> SourceConfig:
+    """Quelle mit Mini-Dumps und Mini-Geometrie im Temp-Verzeichnis."""
+    data_dir = tmp_path / "rebrickable"
+    write_rebrickable_dumps(data_dir)
+    write_geometry(tmp_path / "teil_geometrie.csv")
+    return SourceConfig(
+        data_dir=data_dir,
+        geometry_file=tmp_path / "teil_geometrie.csv",
+        color_mapping_file=tmp_path / "farb_zuordnung.csv",
+        auto_update=False,
+    )
 
 
 @pytest.fixture
