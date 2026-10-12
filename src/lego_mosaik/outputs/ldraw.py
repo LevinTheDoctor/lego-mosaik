@@ -27,6 +27,13 @@ LDU_PER_STUD = 20
 # Rotationsmatrizen (zeilenweise a b c d e f g h i)
 IDENTITY = (1, 0, 0, 0, 1, 0, 0, 0, 1)
 ROTATE_Y_90 = (0, 0, 1, 0, 1, 0, -1, 0, 0)  # 90° um die y-Achse: x → z
+# Formteile: 0 bis 3 Vierteldrehungen im Uhrzeigersinn, von oben gesehen (x → z → −x)
+QUARTER_TURNS = (
+    IDENTITY,
+    (0, 0, -1, 0, 1, 0, 1, 0, 0),
+    (-1, 0, 0, 0, 1, 0, 0, 0, -1),
+    (0, 0, 1, 0, 1, 0, -1, 0, 0),
+)
 # Oberkante des Unterbaus. Plates, Tiles und Unterbau-Platten haben ihren Ursprung
 # an der Oberkante; eine Plate direkt auf dem Unterbau hat damit y = 0 (+y = nach unten)
 SUBSTRATE_TOP_Y = PLATE_HEIGHT_LDU
@@ -93,7 +100,7 @@ def ldraw_lines(
 def step_comment(step: BuildStep) -> str:
     """Kurzer deutscher Name des Schritts, z. B. „Abschnitt 3“."""
     match step.kind:
-        case StepKind.SECTION if step.section is not None:
+        case StepKind.SECTION | StepKind.RELIEF if step.section is not None:
             return f"Abschnitt {step.section.number}"
         case StepKind.SUBSTRATE:
             return _SUBSTRATE_COMMENTS.get(step.placements[0].part.kind, "Unterbau")
@@ -157,7 +164,11 @@ def rotation_matrix(placement: Placement) -> tuple[int, ...]:
 
     Gewünscht ist: ungedreht entlang x (Spalten), gedreht entlang z (Zeilen).
     Liegt die lange Seite in der LDraw-Datei schon so, braucht es keine Drehung.
+    Formteile sind quadratisch und drehen in Vierteln (``Placement.turns``); ihre
+    Grundlage in ``domain/shapes.py`` entspricht der Lage in der LDraw-Datei.
     """
+    if placement.part.is_shaped:
+        return QUARTER_TURNS[placement.turns % len(QUARTER_TURNS)]
     desired = LongAxis.Z if placement.rotated else LongAxis.X
     return IDENTITY if placement.part.ldraw_long_axis is desired else ROTATE_Y_90
 

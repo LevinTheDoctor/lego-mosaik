@@ -24,7 +24,9 @@ from lego_mosaik.config import (
     MosaicConfig,
     PaletteConfig,
     PreviewConfig,
+    ReliefConfig,
     ServerConfig,
+    ShapeConfig,
     SourceConfig,
     TilingConfig,
     frame_part_kinds,
@@ -35,12 +37,14 @@ from lego_mosaik.domain.models import (
     ColorDistance,
     FitMode,
     PartKind,
+    ReliefMode,
     Resampling,
     Substrate,
 )
 from lego_mosaik.registry import (
     DITHERERS,
     OUTPUT_WRITERS,
+    SHAPERS,
     TILING_STRATEGIES,
     resolve,
     validate_registry_names,
@@ -93,6 +97,18 @@ CONFIG = AppConfig(
         serpentine=True,  # Zeilen abwechselnd links/rechts abarbeiten
         bayer_size=4,  # nur "ordered": 2, 4 oder 8
         spread=32.0,  # nur "ordered": Stärke in RGB-Stufen
+    ),
+    shapes=ShapeConfig(
+        style="quadrat",  # quadrat, formen (Rundungen/Schrägen an Kanten), punkte, noppen
+        subsample=6,  # „formen“: Teilpixel pro Noppe und Richtung
+        min_gain=0.2,  # „formen“: Formteil nur bei mindestens 20 % weniger Fehler …
+        min_improvement=3.0,  # … und mindestens ΔE 3 Verbesserung pro Teilpixel
+        underlay=True,  # „formen“: Formteile auf Plates in zweiter Farbe (wie Brick Sketches)
+    ),
+    relief=ReliefConfig(
+        mode=ReliefMode.NONE,  # NONE, SUBJECT (Motiv erhöht), BRIGHT, DARK
+        levels=1,  # höchste Stufe in Plates (1–3)
+        color_id=None,  # Farbe der Stützlagen; None = wie der Unterbau
     ),
     tiling=TilingConfig(strategy="greedy", max_part_length=8, split_sections=True),
     outputs=(
@@ -169,6 +185,7 @@ def build_components(config: AppConfig) -> PipelineComponents:
         tiler=resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(config),
         frame_tiler=build_tiler(config, frame_part_kinds(config)),
         support_tiler=build_tiler(config, (PartKind.PLATE,)),  # Stützlagen brauchen Noppen
+        shaper=resolve(SHAPERS, config.shapes.style, "Stil")(config),
         writers=tuple(
             resolve(OUTPUT_WRITERS, name, "Ausgabeformat")(config) for name in config.outputs
         ),
@@ -191,6 +208,7 @@ def build_pipeline(config: AppConfig) -> MosaicPipeline:
         method_names={
             "Dithering": tuple(DITHERERS),
             "Zerlegung": tuple(TILING_STRATEGIES),
+            "Stile": tuple(SHAPERS),
             "Ausgaben": tuple(OUTPUT_WRITERS),
         },
     )

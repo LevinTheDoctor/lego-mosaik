@@ -43,7 +43,7 @@ def test_create_with_art_panels_and_custom_size(cli: typer.Typer, image_file: Pa
             "--unterbaufarbe",
             "0",
             "--breite",
-            "24",
+            "40",
             "--rahmen-teile",
             "tile",
             "--rahmen-erhoehung",
@@ -53,7 +53,8 @@ def test_create_with_art_panels_and_custom_size(cli: typer.Typer, image_file: Pa
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "24 × 24 Noppen" in result.output  # Höhe aus dem quadratischen Bild
+    # 40 rastet auf ganze 16er-Paneele ein (48), die Höhe kommt aus dem quadratischen Bild
+    assert "48 × 48 Noppen" in result.output
     assert "Technic-Pins" in result.output  # 2 × 2 Paneele sind verbunden
 
 
@@ -103,3 +104,22 @@ def test_update_offline_keeps_existing_files(cli: typer.Typer) -> None:
     result = runner.invoke(cli, ["teile-aktualisieren", "--erzwingen"])
     assert result.exit_code == 0  # alte Dateien bleiben nutzbar
     assert "fehlgeschlagen" in result.output
+
+
+def test_formats_command(cli: typer.Typer) -> None:
+    result = runner.invoke(cli, ["formate"])
+    assert result.exit_code == 0, result.output
+    assert "weltkarte" in result.output and "128 × 80" in result.output
+
+
+def test_create_with_format_style_and_relief(cli: typer.Typer, image_file: Path) -> None:
+    args = ["erstellen", str(image_file), "--format", "klein", "--stil", "formen"]
+    result = runner.invoke(cli, [*args, "--relief", "motiv", "--ausgaben", "preview_png"])
+    assert result.exit_code == 0, result.output
+    assert "32 × 32 Noppen" in result.output
+
+
+def test_unknown_style_exit_code_2(cli: typer.Typer, image_file: Path) -> None:
+    result = runner.invoke(cli, ["erstellen", str(image_file), "--stil", "wellen"])
+    assert result.exit_code == 2
+    assert "punkte" in result.output  # Meldung nennt die gültigen Stile

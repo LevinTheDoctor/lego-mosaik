@@ -4,6 +4,7 @@ lazy from rich.console import Console
 lazy from rich.table import Table
 lazy from rich.text import Text
 
+from lego_mosaik.domain.layout import FORMATS, ArtFormat
 from lego_mosaik.domain.models import LegoColor, Mosaic
 lazy from lego_mosaik.pipeline import MosaicResult
 
@@ -20,8 +21,12 @@ def print_summary(console: Console, result: MosaicResult) -> None:
     table.add_row("Unterbau", _substrate_text(mosaic))
     table.add_row("Farben", str(stats["farben"]))
     parts = f"{stats['parts']} sichtbar"
+    if stats.get("formteile"):
+        parts += f" (davon {stats['formteile']} Formteile)"
     if stats["stuetzteile"]:  # nur bei erhöhtem Rahmen
         parts += f", {stats['stuetzteile']} unter dem Rahmen"
+    if stats.get("relief_teile"):
+        parts += f", {stats['relief_teile']} darunter als Relief und Unterlage"
     table.add_row("Teile", parts)
     table.add_row("Einsparung", f"{stats['savings_percent']} % gegenüber nur 1×1")
     durations = stats["dauer_sekunden"]
@@ -41,6 +46,18 @@ def _substrate_text(mosaic: Mosaic) -> str:
     if mosaic.connectors:
         text += f", verbunden mit {len(mosaic.connectors)} Technic-Pins"
     return text
+
+
+def print_formats(
+    console: Console, plate_studs: int, formats: tuple[ArtFormat, ...] = FORMATS
+) -> None:
+    """Tabelle der Formate mit Größe in Noppen bei der angegebenen Plattengröße."""
+    table = Table("Name", "Platten", "Noppen", "Beschreibung", title="Formate")
+    for art_format in formats:
+        wide, high = art_format.plates_wide, art_format.plates_high
+        studs = f"{wide * plate_studs} × {high * plate_studs}"
+        table.add_row(art_format.name, f"{wide} × {high}", studs, art_format.description)
+    console.print(table)
 
 
 def print_palette(console: Console, palette: tuple[LegoColor, ...]) -> None:

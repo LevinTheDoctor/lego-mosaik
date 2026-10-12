@@ -20,9 +20,11 @@ from lego_mosaik.domain.models import (
     LongAxis,
     PartCatalog,
     PartKind,
+    PartShape,
     PartType,
 )
 from lego_mosaik.domain.palette import SPECIAL_COLOR_IDS
+from lego_mosaik.domain.shapes import shape_size
 from lego_mosaik.sources.studio_colors import (
     StudioColor,
     StudioColorTable,
@@ -60,6 +62,7 @@ class _Geometry:
     height_ldu: int
     ldraw_long_axis: LongAxis
     bricklink_id: str | None
+    shape: PartShape
 
 
 class RebrickableCsvSource:
@@ -156,6 +159,7 @@ def _to_part_type(part_num: str, name: str, row: _Geometry) -> PartType:
         height_ldu=row.height_ldu,
         ldraw_long_axis=row.ldraw_long_axis,
         bricklink_id=row.bricklink_id,
+        shape=row.shape,
     )
 
 
@@ -183,7 +187,16 @@ def _parse_geometry_row(row: dict[str, str]) -> tuple[str, _Geometry]:
         ldraw_long_axis=LongAxis((row.get("ldraw_long_axis") or "x").strip().lower()),
         # optionale Spalte; leer oder fehlend → None (dann gilt die Rebrickable-Nummer)
         bricklink_id=(row.get("bricklink_id") or "").strip() or None,
+        # optionale Spalte; Standard ist ein eckiges Teil
+        shape=PartShape((row.get("shape") or "square").strip().lower()),
     )
+    if geometry.shape is not PartShape.SQUARE and not (
+        width == length == shape_size(geometry.shape)
+    ):
+        raise ValueError(
+            f"Formteile {geometry.shape.value} müssen {shape_size(geometry.shape)} × "
+            f"{shape_size(geometry.shape)} Noppen groß sein"
+        )
     return row["part_num"].strip(), geometry
 
 

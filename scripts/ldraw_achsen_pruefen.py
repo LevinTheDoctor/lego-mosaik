@@ -18,7 +18,9 @@ from pathlib import Path
 
 DEFAULT_LIBRARY = Path("/Applications/Studio 2.0/ldraw")
 GEOMETRY_FILE = Path(__file__).parent.parent / "daten" / "teil_geometrie.csv"
-SEARCH_DIRS = ("parts", "p", "models")  # Unterordner wie "s\\" oder "48\\" stehen im Namen
+# Unterordner wie "s\\" oder "48\\" stehen im Namen; Studio legt neuere Teile (z. B. 25269)
+# unter UnOfficial ab
+SEARCH_DIRS = ("parts", "p", "models", "UnOfficial/parts", "UnOfficial/p")
 GEOMETRY_TYPES = {"2": 2, "3": 3, "4": 4, "5": 2}  # Linientyp → Anzahl Punkte (Typ 5: 2 Punkte)
 
 type Point = tuple[float, float, float]
@@ -89,6 +91,49 @@ def _box_of(points: list[Point]) -> Box:
     # zip(*points) dreht die Liste: alle x-Werte, alle y-Werte, alle z-Werte
     xs, ys, zs = zip(*points, strict=True)
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
+
+
+def footprint(library: Path, name: str) -> list[tuple[float, float]]:
+    """Umriss eines Teils von oben: konvexe Hülle aller Punkte in der x-z-Ebene (in LDU).
+
+    Rekursiv über alle Unterdateien mit ihrer Verschiebung und Drehung. Noppen (über der
+    Oberkante, y < 0) zählen nicht mit.
+    """
+    flat = {(round(x, 2), round(z, 2)) for x, y, z in _all_points(library, name.lower()) if y >= 0}
+    return _hull(sorted(flat))
+
+
+@functools.cache
+def _all_points(library: Path, name: str) -> tuple[Point, ...]:
+    path = find_file(library, name)
+    if path is None:
+        return ()
+    points: list[Point] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = line.split()
+        if fields and fields[0] in GEOMETRY_TYPES:
+            points += _line_points(library, fields)
+        elif fields and fields[0] == "1" and len(fields) >= 15:
+            numbers = [float(v) for v in fields[2:14]]
+            child = _all_points(library, " ".join(fields[14:]).lower())
+            points += [_transform(point, numbers) for point in child]
+    return tuple(points)
+
+
+def _hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Konvexe Hülle (Andrew's Monotone Chain), Punkte sortiert übergeben."""
+
+    def cross(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    upper: list[tuple[float, float]] = []
+    for chain, ordered in ((lower, points), (upper, list(reversed(points)))):
+        for point in ordered:
+            while len(chain) >= 2 and cross(chain[-2], chain[-1], point) <= 0:
+                chain.pop()
+            chain.append(point)
+    return lower[:-1] + upper[:-1]
 
 
 def check(library: Path, geometry_file: Path = GEOMETRY_FILE) -> list[str]:

@@ -101,3 +101,13 @@ def test_missing_upload_is_422(client: TestClient) -> None:
 
 def test_unknown_mosaic_is_404(client: TestClient) -> None:
     assert client.get("/mosaike/gibt-es-nicht").status_code == 404
+
+
+def test_create_with_format_style_and_relief(client: TestClient, image_file: Path) -> None:
+    fields = {"format": "klein", "stil": "punkte", "relief": "hell", "relief_hoehe": "2"}
+    body = _upload(client, image_file, **fields)
+    stats = body["statistik"]
+    assert isinstance(stats, dict)
+    assert (stats["breite"], stats["hoehe"]) == (32, 32)
+    assert stats["formteile"] == 30 * 30  # punkte: jede Bildnoppe rund
+    assert stats["relief_teile"]

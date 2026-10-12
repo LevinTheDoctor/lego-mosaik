@@ -14,14 +14,16 @@ from lego_mosaik.interfaces.display import UPPER_HALF_BLOCK, mosaic_preview
 runner = CliRunner()
 
 # Menüpunkte (siehe InteractiveSession._actions)
-LOAD, SIZE, FRAME, SETTINGS, PREVIEW, CREATE, PALETTE, QUIT = (
+LOAD, SIZE, FRAME, STYLE, SETTINGS, PREVIEW, CREATE, PALETTE, FORMATS, QUIT = (
     "1",
     "2",
     "3",
-    "8",
+    "6",
     "9",
     "10",
     "11",
+    "12",
+    "13",
     "0",
 )
 
@@ -90,14 +92,15 @@ def test_custom_size_and_reset(cli: typer.Typer, image_file: Path) -> None:
         SIZE,
         "",  # Unterbau
         "",  # Plattengröße
+        "",  # Format
         "",  # Platten
-        "20",  # eigene Breite
-        "",  # Höhe aus dem Seitenverhältnis (quadratisch → 20)
+        "30",  # eigene Breite, rastet auf zwei 16er-Platten ein (32)
+        "",  # Höhe aus dem Seitenverhältnis (quadratisch → 32)
         "",  # Farbe
         PREVIEW,
         QUIT,
     )
-    assert "20 × 20 Noppen" in output
+    assert "32 × 32 Noppen" in output
 
 
 def test_preview_and_create_need_an_image(cli: typer.Typer) -> None:
@@ -129,3 +132,28 @@ def test_end_of_input_inside_a_group_quits(cli: typer.Typer) -> None:
     result = runner.invoke(cli, ["interaktiv"], input=f"{FRAME}\n2\n")  # Eingabe endet mitten drin
     assert result.exit_code == 0
     assert "Tschüss" in result.output
+
+
+def test_formats_are_suggested_and_listed(cli: typer.Typer, image_file: Path) -> None:
+    output = _run(cli, LOAD, str(image_file), FORMATS, QUIT)
+    assert "Passende Formate: mini (16 × 16)" in output  # quadratisches Bild
+    assert "weltkarte" in output
+
+
+def test_format_replaces_custom_size(cli: typer.Typer, image_file: Path) -> None:
+    size_answers = ("", "", "", "", "50", "", "")  # eigene Breite 50 (rastet auf 48 ein)
+    format_answers = ("", "", "klein", "", "", "", "")  # danach Format „klein“
+    output = _run(
+        cli, LOAD, str(image_file), SIZE, *size_answers, SIZE, *format_answers, PREVIEW, QUIT
+    )
+    assert output.count("Übernommen") == 2
+    assert "32 × 32 Noppen" in output  # Format 2 × 2 Platten à 16 Noppen
+
+
+def test_style_and_relief_group(cli: typer.Typer, image_file: Path) -> None:
+    output = _run(
+        cli, LOAD, str(image_file), STYLE, "punkte", "motiv", "2", SETTINGS, PREVIEW, QUIT
+    )
+    assert "Übernommen" in output
+    assert "punkte" in output and "motiv" in output
+    assert UPPER_HALF_BLOCK in output

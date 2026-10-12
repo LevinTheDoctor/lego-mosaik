@@ -14,8 +14,9 @@ und die Registry wäre beim Start womöglich leer.
 
 from collections.abc import Callable, Mapping
 
-from lego_mosaik.config import AppConfig
+from lego_mosaik.config import PLAIN_STYLE, AppConfig
 from lego_mosaik.domain.errors import ConfigError
+from lego_mosaik.domain.models import PartKind
 lazy from lego_mosaik.dithering.error_diffusion import (
     ATKINSON,
     FLOYD_STEINBERG,
@@ -35,6 +36,10 @@ lazy from lego_mosaik.outputs.parts_list_csv import PartsListCsvWriter
 lazy from lego_mosaik.outputs.preview_png import PreviewPngWriter
 lazy from lego_mosaik.outputs.protocol import OutputWriter
 lazy from lego_mosaik.outputs.result_json import ResultJsonWriter
+lazy from lego_mosaik.shaping.contour import ContourShaper
+lazy from lego_mosaik.shaping.dots import DotShaper
+lazy from lego_mosaik.shaping.plain import PlainShaper
+lazy from lego_mosaik.shaping.protocol import ShapeRefiner
 lazy from lego_mosaik.tiling.greedy import GreedyTiling
 lazy from lego_mosaik.tiling.protocol import TilingStrategy
 lazy from lego_mosaik.tiling.single_stud import SingleStudTiling
@@ -43,6 +48,7 @@ lazy from lego_mosaik.tiling.single_stud import SingleStudTiling
 type DithererFactory = Callable[[AppConfig], Ditherer]
 type TilingFactory = Callable[[AppConfig], TilingStrategy]
 type OutputWriterFactory = Callable[[AppConfig], OutputWriter]
+type ShaperFactory = Callable[[AppConfig], ShapeRefiner]
 
 
 def _color_space(config: AppConfig) -> LabColorSpace:
@@ -77,6 +83,20 @@ DITHERERS: dict[str, DithererFactory] = {
 TILING_STRATEGIES: dict[str, TilingFactory] = {
     "single_stud": lambda config: SingleStudTiling(config.palette.part_kinds),
     "greedy": lambda config: GreedyTiling(config.palette.part_kinds, config.tiling.max_part_length),
+}
+
+# Stile des Bilds (Schlüssel = ShapeConfig.style)
+SHAPERS: dict[str, ShaperFactory] = {
+    PLAIN_STYLE: lambda config: PlainShaper(),
+    "formen": lambda config: ContourShaper(
+        config.shapes.shapes,
+        subsample=config.shapes.subsample,
+        min_gain=config.shapes.min_gain,
+        min_improvement=config.shapes.min_improvement,
+        underlay=config.shapes.underlay,
+    ),
+    "punkte": lambda config: DotShaper(PartKind.TILE),
+    "noppen": lambda config: DotShaper(PartKind.PLATE),
 }
 
 OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
@@ -137,5 +157,6 @@ def validate_registry_names(config: AppConfig) -> None:
     """
     resolve(DITHERERS, config.dithering.method, "Dithering-Verfahren")
     resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")
+    resolve(SHAPERS, config.shapes.style, "Stil")
     for output_name in config.outputs:
         resolve(OUTPUT_WRITERS, output_name, "Ausgabeformat")

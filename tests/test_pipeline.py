@@ -5,14 +5,16 @@ import json
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 from conftest import make_pipeline
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from lego_mosaik.config import AppConfig, MosaicOverrides
 from lego_mosaik.domain.errors import ConfigError, DownloadError
 from lego_mosaik.domain.layout import frame_mask
-from lego_mosaik.domain.models import ColorCategory, PartKind, Substrate
+from lego_mosaik.domain.models import ColorCategory, Mosaic, PartKind, ReliefMode, Substrate
+from lego_mosaik.domain.sections import StepKind, assembly_steps
 from lego_mosaik.pipeline import safe_name
 
 
@@ -93,9 +95,20 @@ def test_custom_size_from_aspect_ratio(pipeline_config: AppConfig, tmp_path: Pat
     Image.new("RGB", (40, 20), (201, 26, 9)).save(wide_image)  # Seitenverhältnis 2:1
     overrides = MosaicOverrides(width_studs=42)
     mosaic = make_pipeline(pipeline_config).run(wide_image, overrides).mosaic
-    # Bildfläche 40 × 20 (2:1) plus Rahmen 1 auf jeder Seite → 42 × 22
+    # 42 rastet auf drei 16er-Grundplatten ein (48); Bildfläche 46 breit → 23 hoch plus
+    # Rahmen = 25, rastet auf zwei Platten ein (32). Kein Teil des Unterbaus steht über.
+    assert (mosaic.width, mosaic.height) == (48, 32)
+    assert len(mosaic.substrate) == 3 * 2
+
+
+def test_custom_size_without_substrate_is_exact(pipeline_config: AppConfig, tmp_path: Path) -> None:
+    wide_image = tmp_path / "quer.png"
+    Image.new("RGB", (40, 20), (201, 26, 9)).save(wide_image)  # Seitenverhältnis 2:1
+    overrides = MosaicOverrides(substrate=Substrate.NONE, width_studs=42)
+    mosaic = make_pipeline(pipeline_config).preview(wide_image, overrides)
+    # Ohne Unterbau ist jede Größe baubar: Bildfläche 40 × 20 plus Rahmen → 42 × 22
     assert (mosaic.width, mosaic.height) == (42, 22)
-    assert len(mosaic.substrate) == 3 * 2  # 16er-Grundplatten, aufgerundet
+    assert not mosaic.substrate
 
 
 def test_preview_writes_no_files(pipeline_config: AppConfig, image_file: Path) -> None:
@@ -165,3 +178,75 @@ def test_no_part_crosses_a_section(pipeline_config: AppConfig, image_file: Path)
     for placement in mosaic.placements:
         cells = list(placement.cells())
         assert len({(row // 8, col // 8) for row, col in cells}) == 1
+
+
+# --- Stile und Relief ----------------------------------------------------------------
+
+
+@pytest.fixture
+def circle_file(tmp_path: Path) -> Path:
+    """Roter Kreis auf Weiß: runde Kontur für die Formwahl."""
+    path = tmp_path / "kreis.png"
+    image = Image.new("RGB", (140, 140), (255, 255, 255))
+    ImageDraw.Draw(image).ellipse((20, 20, 120, 120), fill=(201, 26, 9))
+    image.save(path)
+    return path
+
+
+def _coverage(mosaic: Mosaic) -> npt.NDArray[np.intp]:
+    """Wie oft jede Zelle von einem sichtbaren Bildteil belegt ist."""
+    counts = np.zeros((mosaic.height, mosaic.width), dtype=np.intp)
+    for placement in mosaic.placements:
+        for cell in placement.cells():
+            counts[cell] += 1
+    return counts
+
+
+@pytest.mark.parametrize("style", ["formen", "punkte", "noppen"])
+def test_styles_cover_every_image_cell_once(
+    pipeline_config: AppConfig, circle_file: Path, style: str
+) -> None:
+    mosaic = make_pipeline(pipeline_config).preview(circle_file, MosaicOverrides(style=style))
+    inner = ~frame_mask(mosaic.height, mosaic.width, 1)
+    counts = _coverage(mosaic)
+    assert (counts[inner] == 1).all() and (counts[~inner] == 0).all()
+    shaped = [p for p in mosaic.placements if p.part.is_shaped]
+    assert shaped
+    if style != "formen":  # punkte und noppen: jede Noppe rund
+        assert len(shaped) == inner.sum()
+    assert mosaic.metadata["statistik"]["formteile"] == len(shaped)  # type: ignore[index]
+
+
+def test_shape_underlays_sit_below_their_parts(
+    pipeline_config: AppConfig, circle_file: Path
+) -> None:
+    mosaic = make_pipeline(pipeline_config).preview(circle_file, MosaicOverrides(style="formen"))
+    under = {cell: p for p in mosaic.relief for cell in p.cells()}
+    for part in (p for p in mosaic.placements if p.part.is_shaped and p.bottom_ldu):
+        for cell in part.cells():
+            assert under[cell].top_ldu == part.bottom_ldu
+
+
+def test_relief_lifts_the_subject(pipeline_config: AppConfig, circle_file: Path) -> None:
+    overrides = MosaicOverrides(relief=ReliefMode.SUBJECT, relief_levels=2)
+    mosaic = make_pipeline(pipeline_config).preview(circle_file, overrides)
+    raised = [p for p in mosaic.placements if p.bottom_ldu == 16]
+    flat = [p for p in mosaic.placements if p.bottom_ldu == 0]
+    assert raised and flat
+    assert {p.color.id for p in flat} == {15}  # weißer Hintergrund bleibt unten
+    assert {p.bottom_ldu for p in mosaic.relief} == {0, 8}  # zwei Stützlagen
+    assert {p.color.id for p in mosaic.relief} == {15}  # in der Farbe des Unterbaus
+    steps = assembly_steps(mosaic, section_studs=16, rows_per_step=4)
+    image_steps = [step.kind for step in steps if step.section is not None]
+    assert image_steps[:2] == [StepKind.RELIEF, StepKind.RELIEF]  # erst die Lagen, dann das Bild
+    assert StepKind.SECTION in image_steps
+
+
+def test_shaped_parts_in_ldraw_and_parts_list(
+    pipeline_config: AppConfig, circle_file: Path
+) -> None:
+    result = make_pipeline(pipeline_config).run(circle_file, MosaicOverrides(style="punkte"))
+    ldr = (result.target_dir / "mosaik.ldr").read_text(encoding="utf-8")
+    assert "98138.dat" in ldr
+    parts_list = (result.target_dir / "teileliste.csv").read_text(encoding="utf-8")
+    assert "98138" in parts_list

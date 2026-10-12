@@ -18,7 +18,7 @@ lazy from rich.table import Table
 from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
 from lego_mosaik.domain.models import LegoColor
-from lego_mosaik.interfaces.display import print_palette, print_summary
+from lego_mosaik.interfaces.display import print_formats, print_palette, print_summary
 lazy from lego_mosaik.interfaces.interactive import InteractiveSession
 lazy from lego_mosaik.pipeline import MosaicPipeline, MosaicResult
 lazy from lego_mosaik.sources.protocol import FileStatus, UpdateReport
@@ -34,6 +34,7 @@ type ServeFunction = Callable[[AppConfig, str, int], None]
 SIZE_PANEL = "Größe und Unterbau"
 FRAME_PANEL = "Rahmen"
 IMAGE_PANEL = "Bild und Farben"
+STYLE_PANEL = "Stil und Relief"
 METHOD_PANEL = "Verfahren und Ausgaben"
 
 
@@ -137,6 +138,14 @@ def _register_create(
                 rich_help_panel=SIZE_PANEL,
             ),
         ] = None,
+        format_name: Annotated[
+            str | None,
+            typer.Option(
+                "--format",
+                help="Format, z. B. quadrat (3×3 Paneele), quer, weltkarte (siehe „formate“).",
+                rich_help_panel=SIZE_PANEL,
+            ),
+        ] = None,
         platten: Annotated[
             str | None,
             typer.Option(help="Anzahl Platten als BxH, z. B. 3x3.", rich_help_panel=SIZE_PANEL),
@@ -144,7 +153,8 @@ def _register_create(
         breite: Annotated[
             int | None,
             typer.Option(
-                help="Eigene Breite in Noppen (statt Platten).", rich_help_panel=SIZE_PANEL
+                help="Eigene Breite in Noppen; rastet auf ganze Platten ein.",
+                rich_help_panel=SIZE_PANEL,
             ),
         ] = None,
         hoehe: Annotated[
@@ -215,6 +225,26 @@ def _register_create(
             int | None,
             typer.Option(help="Höchstens so viele Farben (0 = alle).", rich_help_panel=IMAGE_PANEL),
         ] = None,
+        stil: Annotated[
+            str | None,
+            typer.Option(
+                help="quadrat, formen (Rundungen und Schrägen an Kanten), punkte "
+                "(runde Tiles) oder noppen (runde Plates).",
+                rich_help_panel=STYLE_PANEL,
+            ),
+        ] = None,
+        relief: Annotated[
+            str | None,
+            typer.Option(
+                help="ohne, motiv (Hintergrund flach, Motiv erhöht), hell oder dunkel "
+                "(helle bzw. dunkle Farben höher).",
+                rich_help_panel=STYLE_PANEL,
+            ),
+        ] = None,
+        relief_hoehe: Annotated[
+            int | None,
+            typer.Option(help="Höchste Relief-Stufe in Plates (1–3).", rich_help_panel=STYLE_PANEL),
+        ] = None,
         dithering: Annotated[
             str | None, typer.Option(help="Dithering-Verfahren.", rich_help_panel=METHOD_PANEL)
         ] = None,
@@ -241,6 +271,7 @@ def _register_create(
         raw = OverrideInput(
             substrate=unterbau,
             plate_studs=plattengroesse,
+            art_format=format_name,
             plates=platten,
             width_studs=breite,
             height_studs=hoehe,
@@ -257,6 +288,9 @@ def _register_create(
             color_categories=farbkategorien,
             exotic_colors=exotische_farben,
             max_colors=max_farben,
+            style=stil,
+            relief=relief,
+            relief_levels=relief_hoehe,
             dithering_method=dithering,
             strength=staerke,
             color_distance=farbabstand,
@@ -343,6 +377,11 @@ def _register_catalog_commands(
             return pipeline_factory(config).palette(parse_overrides(raw))
 
         print_palette(console, _run_safely(state, console, action))
+
+    @app.command("formate")
+    def formats() -> None:
+        """Listet die Formate (Raster aus Paneelen bzw. Grundplatten) auf."""
+        print_formats(console, config.layout.plate_studs)
 
     @app.command("verfahren")
     def methods() -> None:

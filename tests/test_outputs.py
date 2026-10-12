@@ -69,6 +69,29 @@ def test_long_axis_z_inverts_rotation(catalog: PartCatalog) -> None:
     assert " 1 0 0 0 1 0 0 0 1 " in _line(turned)
 
 
+@pytest.mark.parametrize(
+    ("turns", "matrix"),
+    [
+        (0, " 1 0 0 0 1 0 0 0 1 "),
+        (1, " 0 0 -1 0 1 0 1 0 0 "),  # Viertel im Uhrzeigersinn (von oben): x → z
+        (2, " -1 0 0 0 1 0 0 0 -1 "),
+        (3, " 0 0 1 0 1 0 -1 0 0 "),
+    ],
+)
+def test_shaped_parts_rotate_in_quarter_turns(
+    catalog: PartCatalog, turns: int, matrix: str
+) -> None:
+    quarter = Placement(catalog.part_types["25269"], catalog.colors[4], 2, 3, turns=turns)
+    line = _line(quarter)
+    assert matrix in line
+    assert line.startswith("1 4 70 0 50 ")  # Mitte der Zelle (Zeile 2, Spalte 3)
+
+
+def test_triangle_is_centered_on_its_two_by_two_box(catalog: PartCatalog) -> None:
+    triangle = Placement(catalog.part_types["35787"], catalog.colors[15], 0, 0, bottom_ldu=8)
+    assert _line(triangle).startswith("1 15 20 -8 20 ")  # eine Plate höher, Mitte bei 1 × 1
+
+
 def test_heights_of_stacked_parts(catalog: PartCatalog) -> None:
     tile, brick = catalog.part_types["3070b"], catalog.part_types["3005"]
     # Ursprung = Oberkante; y zeigt nach unten: höher liegende Teile haben kleineres y

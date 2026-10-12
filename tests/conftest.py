@@ -15,6 +15,9 @@ Trans-Red  36    Plate 1×1                              raus: transparent
 =========  ====  =====================================  =============================
 
 Unterbau: Grundplatte 16 × 16 in White, LEGO-Art-Paneel 16 × 16 und Technic-Pin in Black.
+
+Formteile (nur für Stile, nie in Palette oder Zerlegung): Tile Round 1 × 1 in Black, Red und
+White; Plate Round 1 × 1, Quarter-Tile und Dreieck-Tile 2 × 2 in Red und White.
 """
 
 import csv
@@ -39,7 +42,14 @@ from lego_mosaik.config import (
     SourceConfig,
     TilingConfig,
 )
-from lego_mosaik.domain.models import ColorCategory, LegoColor, PartCatalog, PartKind, PartType
+from lego_mosaik.domain.models import (
+    ColorCategory,
+    LegoColor,
+    PartCatalog,
+    PartKind,
+    PartShape,
+    PartType,
+)
 from lego_mosaik.main import build_catalog_source, build_components, build_updater
 from lego_mosaik.pipeline import MosaicPipeline
 from lego_mosaik.registry import DITHERERS
@@ -79,8 +89,16 @@ PART_ROWS: tuple[tuple[str, str, PartKind, int, int, int], ...] = (
     ("2780", "Technic Pin with Friction Ridges", PartKind.CONNECTOR, 1, 2, 12),
 )
 
+# Formteile: (part_num, name, kind, Kantenlänge, Umriss)
+SHAPED_PART_ROWS: tuple[tuple[str, str, PartKind, int, PartShape], ...] = (
+    ("98138", "Tile Round 1 x 1", PartKind.TILE, 1, PartShape.ROUND),
+    ("6141", "Plate Round 1 x 1", PartKind.PLATE, 1, PartShape.ROUND),
+    ("25269", "Tile Round 1 x 1 Quarter", PartKind.TILE, 1, PartShape.QUARTER),
+    ("35787", "Tile 45° Cut 2 x 2 (Triangle)", PartKind.TILE, 2, PartShape.TRIANGLE),
+)
+
 # Abweichende BrickLink-Teilenummern (wie in daten/teil_geometrie.csv)
-BRICKLINK_IDS = {"3070b": "3070"}
+BRICKLINK_IDS = {"3070b": "3070", "6141": "4073"}
 
 # (part_num, color_id) – welche Kombinationen es gibt
 AVAILABLE: tuple[tuple[str, int], ...] = (
@@ -103,6 +121,15 @@ AVAILABLE: tuple[tuple[str, int], ...] = (
     ("3867", 15),
     ("65803", 0),
     ("2780", 0),
+    ("98138", 0),
+    ("98138", 4),
+    ("98138", 15),
+    ("6141", 4),
+    ("6141", 15),
+    ("25269", 4),
+    ("25269", 15),
+    ("35787", 4),
+    ("35787", 15),
 )
 
 
@@ -136,6 +163,20 @@ def make_catalog() -> PartCatalog:
             bricklink_id=BRICKLINK_IDS.get(part_num),
         )
         for part_num, name, kind, width, length, height in PART_ROWS
+    }
+    part_types |= {
+        part_num: PartType(
+            part_num,
+            name,
+            kind,
+            size,
+            size,
+            f"{part_num}.dat",
+            8,
+            bricklink_id=BRICKLINK_IDS.get(part_num),
+            shape=shape,
+        )
+        for part_num, name, kind, size, shape in SHAPED_PART_ROWS
     }
     element_ids = {combo: _element_id(index) for index, combo in enumerate(AVAILABLE)}
     return PartCatalog(colors, part_types, frozenset(AVAILABLE), element_ids)
@@ -173,7 +214,7 @@ def write_rebrickable_dumps(data_dir: Path) -> None:
         color_rows,
         compressed=True,
     )
-    part_rows = [(num, name, 14, "Plastic") for num, name, *_ in PART_ROWS]
+    part_rows = [(num, name, 14, "Plastic") for num, name, *_ in PART_ROWS + SHAPED_PART_ROWS]
     part_rows.append(("9999x", "Brick, Modified 1 x 2", 11, "Plastic"))
     write_csv(
         data_dir / "parts.csv.gz",
@@ -201,10 +242,15 @@ def write_geometry(path: Path) -> None:
         "ldraw_file",
         "height_ldu",
         "bricklink_id",
+        "shape",
     )
     rows = [
-        (num, kind.value, w, length, f"{num}.dat", h, BRICKLINK_IDS.get(num, ""))
+        (num, kind.value, w, length, f"{num}.dat", h, BRICKLINK_IDS.get(num, ""), "")
         for num, _, kind, w, length, h in PART_ROWS
+    ]
+    rows += [
+        (num, kind.value, n, n, f"{num}.dat", 8, BRICKLINK_IDS.get(num, ""), shape.value)
+        for num, _, kind, n, shape in SHAPED_PART_ROWS
     ]
     write_csv(path, header, rows, compressed=False)
 

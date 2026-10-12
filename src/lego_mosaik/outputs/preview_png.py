@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from lego_mosaik.domain.models import Mosaic
-from lego_mosaik.outputs.rendering import Region, render_placements
+from lego_mosaik.outputs.rendering import EMPTY_CELL_RGB, Region, render_placements
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,18 @@ class PreviewPngWriter:
         self._draw_part_edges = draw_part_edges
 
     def write(self, mosaic: Mosaic, target_dir: Path) -> Path:
-        """Zeichnet die sichtbare Oberfläche (Rahmen und Bild) und speichert sie als PNG."""
+        """Zeichnet die Draufsicht und speichert sie als PNG.
+
+        Gezeichnet wird von unten nach oben (Relief-Stützlagen, dann Rahmen und Bild).
+        Der Hintergrund hat die Farbe des Unterbaus: Er ist in den Lücken der Formteile zu sehen.
+        """
+        background = mosaic.substrate[0].color.rgb if mosaic.substrate else EMPTY_CELL_RGB
         image = render_placements(
-            mosaic.surface,
+            mosaic.stacked,
             region=Region(0, 0, mosaic.height, mosaic.width),
             stud_px=self._stud_px,
             draw_part_edges=self._draw_part_edges,
+            background=background,
         )
         path = target_dir / FILE_NAME
         image.save(path, format="PNG")

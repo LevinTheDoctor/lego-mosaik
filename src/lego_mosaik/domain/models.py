@@ -48,6 +48,31 @@ class PartKind(StrEnum):
 MOSAIC_PART_KINDS = (PartKind.PLATE, PartKind.TILE, PartKind.BRICK)
 
 
+class PartShape(StrEnum):
+    """Umriss eines Teils von oben. Alles außer SQUARE heißt hier „Formteil“.
+
+    Formteile bedecken ihre Fläche nur teilweise; in den Lücken sieht man, was darunter
+    liegt (Paneel, Grundplatte oder eine Stützlage), wie bei LEGO Art und Brick Sketches.
+    Die Umrisse stehen in ``domain/shapes.py``.
+    """
+
+    SQUARE = "square"  # Rechteck, füllt alle Noppen (Plate, Tile, Brick)
+    ROUND = "round"  # Tile Round 1 × 1 bzw. Plate Round 1 × 1 („Stud“)
+    QUARTER = "quarter"  # Tile 1 × 1 Quarter Circle
+    HALF = "half"  # Tile 1 × 1 Half Circle
+    TRIANGLE = "triangle"  # Tile 2 × 2 Triangular (45°)
+    CUT_CORNER = "cut_corner"  # Wedge Plate 2 × 2 Cut Corner
+
+
+class ReliefMode(StrEnum):
+    """Wie Bildteile wie bei Brick Sketches in die Höhe gestuft werden."""
+
+    NONE = "none"  # flach
+    SUBJECT = "subject"  # Hintergrund flach, Motiv erhöht
+    BRIGHT = "bright"  # helle Farben höher
+    DARK = "dark"  # dunkle Farben höher
+
+
 class Substrate(StrEnum):
     """Worauf das Mosaik gebaut wird (der Unterbau)."""
 
@@ -154,6 +179,7 @@ class PartType:
         height_ldu: Höhe in LDU (Plate/Tile 8, Brick 24).
         ldraw_long_axis: Achse der langen Seite in der LDraw-Datei.
         bricklink_id: Teilenummer bei BrickLink, falls abweichend (z. B. 3070 statt 3070b).
+        shape: Umriss von oben; Formteile sind quadratisch groß (1 × 1 oder 2 × 2).
     """
 
     part_num: str
@@ -165,6 +191,7 @@ class PartType:
     height_ldu: int
     ldraw_long_axis: LongAxis = LongAxis.X
     bricklink_id: str | None = None
+    shape: PartShape = PartShape.SQUARE
 
     @property
     def bricklink_item(self) -> str:
@@ -172,9 +199,14 @@ class PartType:
         return self.bricklink_id or self.part_num
 
     @property
+    def is_shaped(self) -> bool:
+        """True bei Formteilen (rund, Viertelkreis, Dreieck, …), die Lücken lassen."""
+        return self.shape is not PartShape.SQUARE
+
+    @property
     def is_single_stud(self) -> bool:
-        """True, wenn das Teil genau eine Noppe groß ist (1×1)."""
-        return self.width_studs == 1 and self.length_studs == 1
+        """True, wenn das Teil genau eine Noppe vollständig belegt (1×1, eckig)."""
+        return self.width_studs == 1 and self.length_studs == 1 and not self.is_shaped
 
     @property
     def area(self) -> int:
@@ -203,18 +235,32 @@ class PartCatalog:
         # "in" auf einem frozenset ist eine Hash-Abfrage: O(1), unabhängig von der Größe
         return (part_num, color_id) in self.available
 
-    def parts_in_color(self, color_id: int, kinds: Iterable[PartKind]) -> tuple[PartType, ...]:
-        """Alle Teiltypen der erlaubten Arten, die es in dieser Farbe gibt.
+    def parts_in_color(
+        self,
+        color_id: int,
+        kinds: Iterable[PartKind],
+        shapes: Iterable[PartShape] = (PartShape.SQUARE,),
+    ) -> tuple[PartType, ...]:
+        """Alle Teiltypen der erlaubten Arten und Umrisse, die es in dieser Farbe gibt.
 
-        Die Reihenfolge ist deterministisch (nach Teilenummer sortiert).
+        Ohne ``shapes`` nur eckige Teile: Zerlegung und Palette arbeiten mit vollen
+        Noppen, Formteile setzt nur die Formwahl (``shaping``). Die Reihenfolge ist
+        deterministisch (nach Teilenummer sortiert).
         """
-        allowed = frozenset(kinds)
-        # Generator-Ausdruck mit zwei Bedingungen: Teilart erlaubt UND in der Farbe verfügbar
+        allowed, allowed_shapes = frozenset(kinds), frozenset(shapes)
+        # Generator-Ausdruck mit drei Bedingungen: Teilart und Umriss erlaubt, Farbe verfügbar
         matching = (
             part
             for part in self.part_types.values()
-            if part.kind in allowed and self.is_available(part.part_num, color_id)
+            if part.kind in allowed
+            and part.shape in allowed_shapes
+            and self.is_available(part.part_num, color_id)
         )
+        return tuple(sorted(matching, key=lambda part: part.part_num))
+
+    def parts_with_shape(self, shape: PartShape) -> tuple[PartType, ...]:
+        """Alle Teiltypen mit diesem Umriss, nach Teilenummer sortiert."""
+        matching = (part for part in self.part_types.values() if part.shape is shape)
         return tuple(sorted(matching, key=lambda part: part.part_num))
 
     def element_id(self, part_num: str, color_id: int) -> str | None:
@@ -237,6 +283,8 @@ class Placement:
         rotated: True, wenn die lange Seite entlang der Zeilen (nach unten) liegt.
         bottom_ldu: Höhe der Unterkante über der Oberseite des Unterbaus in LDU
             (0 = direkt auf Grundplatte/Paneel; ein erhöhter Rahmen liegt höher).
+        turns: Nur Formteile: Vierteldrehungen im Uhrzeigersinn (Draufsicht, 0–3)
+            gegenüber der Grundlage in ``domain/shapes.py``.
     """
 
     part: PartType
@@ -245,6 +293,7 @@ class Placement:
     col: int
     rotated: bool = False
     bottom_ldu: int = 0
+    turns: int = 0
 
     @property
     def top_ldu(self) -> int:
@@ -278,7 +327,8 @@ class Mosaic:
 
     Von unten nach oben: Unterbau (Grundplatten oder Art-Paneele) → Verbinder
     (Technic-Pins zwischen den Paneelen) → Stützteile unter einem erhöhten Rahmen →
-    Rahmen → Bild. Rahmen und Bild bilden zusammen die sichtbare Oberfläche.
+    Rahmen → Relief-Stützlagen → Bild. Rahmen und Bild bilden zusammen die sichtbare
+    Oberfläche.
 
     Attributes:
         title: Anzeigename, meist der Bilddateiname ohne Endung.
@@ -289,6 +339,8 @@ class Mosaic:
         placements: Die Teile des Bilds innerhalb des Rahmens (werden pro Abschnitt gebaut).
         frame: Die sichtbaren Teile des Rahmens.
         supports: Unsichtbare Plates unter einem erhöhten Rahmen.
+        relief: Plates unter erhöhten Bildteilen (Relief wie bei Brick Sketches); sie
+            werden pro Abschnitt vor dem Bild gebaut.
         substrate: Grundplatten bzw. Art-Paneele unter dem Mosaik (leer = ohne Unterbau).
         connectors: Technic-Pins, die benachbarte Art-Paneele verbinden.
         element_ids: LEGO-Element-IDs der genutzten (Teilenummer, Farb-ID)-Kombinationen.
@@ -306,6 +358,7 @@ class Mosaic:
     supports: tuple[Placement, ...] = ()
     substrate: tuple[Placement, ...] = ()
     connectors: tuple[Placement, ...] = ()
+    relief: tuple[Placement, ...] = ()
     element_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -315,9 +368,14 @@ class Mosaic:
         return self.frame + self.placements
 
     @property
+    def stacked(self) -> tuple[Placement, ...]:
+        """Alles über dem Unterbau, von unten nach oben (für Draufsichten und 3D-Bilder)."""
+        return self.supports + self.relief + self.surface
+
+    @property
     def all_parts(self) -> tuple[Placement, ...]:
         """Alle Teile aller Lagen zusammen (z. B. für Teilelisten)."""
-        return self.substrate + self.connectors + self.supports + self.surface
+        return self.substrate + self.connectors + self.stacked
 
     def color_at(self, row: int, col: int) -> LegoColor:
         """Farbe der Zelle (Zeile, Spalte)."""

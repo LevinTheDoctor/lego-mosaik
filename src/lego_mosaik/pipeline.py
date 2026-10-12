@@ -9,7 +9,7 @@ Dithering-Verfahren oder eine PostgreSQL-Quelle dazukommt.
 import logging
 import re
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
@@ -24,6 +24,7 @@ from lego_mosaik.config import (
     apply_overrides,
     config_to_dict,
     frame_part_kinds,
+    relief_color_id,
     substrate_color_id,
 )
 from lego_mosaik.domain.errors import ConfigError
@@ -46,6 +47,7 @@ from lego_mosaik.domain.models import (
     EMPTY_CELL,
     PLATE_HEIGHT_LDU,
     SUBSTRATE_PART_KINDS,
+    FloatImage,
     IndexGrid,
     LegoColor,
     Mosaic,
@@ -53,14 +55,17 @@ from lego_mosaik.domain.models import (
     PartKind,
     PartType,
     Placement,
+    ReliefMode,
     Substrate,
     TilingStats,
 )
 from lego_mosaik.domain.palette import build_palette, most_used_colors
+from lego_mosaik.domain.relief import relief_levels
 from lego_mosaik.domain.sections import split_sections
 lazy from lego_mosaik.dithering.protocol import ColorSpace, Ditherer
 lazy from lego_mosaik.imaging.protocol import ImageInfo, ImagePreparer, RgbImage
 lazy from lego_mosaik.outputs.protocol import OutputWriter
+lazy from lego_mosaik.shaping.protocol import ShapeRefiner, ShapeResult
 lazy from lego_mosaik.sources.protocol import (
     CatalogUpdaterProtocol,
     FileInfo,
@@ -88,7 +93,8 @@ class PipelineComponents:
     Attributes:
         tiler: Zerlegt das Bild.
         frame_tiler: Zerlegt den Rahmen (eigene Teilarten, z. B. nur Tiles).
-        support_tiler: Zerlegt die Plates unter einem erhöhten Rahmen.
+        support_tiler: Zerlegt die Plates unter einem erhöhten Rahmen und unter dem Relief.
+        shaper: Wählt Formteile (Stil des Bilds).
     """
 
     image_preparer: ImagePreparer
@@ -97,6 +103,7 @@ class PipelineComponents:
     tiler: TilingStrategy
     frame_tiler: TilingStrategy
     support_tiler: TilingStrategy
+    shaper: ShapeRefiner
     writers: tuple[OutputWriter, ...]
 
 
@@ -192,7 +199,8 @@ class MosaicPipeline:
     def palette(self, overrides: MosaicOverrides | None = None) -> tuple[LegoColor, ...]:
         """Palette für die (ggf. überschriebenen) Teilarten und Farbkategorien."""
         run_config = apply_overrides(self.config, overrides or MosaicOverrides())
-        return _palette(self.load_catalog(run_config), run_config)
+        shaper = self._component_factory(run_config).shaper
+        return _palette(self.load_catalog(run_config), run_config, shaper)
 
     def inspect_image(self, image: Path | bytes) -> ImageInfo:
         """Prüft ein Bild und liefert Größe und Format (z. B. für den interaktiven Modus).
@@ -258,7 +266,7 @@ class MosaicPipeline:
         components = self._component_factory(run_config)
         with timer.step("Teilekatalog laden"):
             catalog = self.load_catalog(run_config)
-            palette = _palette(catalog, run_config)
+            palette = _palette(catalog, run_config, components.shaper)
             materials = _Materials.resolve(catalog, run_config)
         with timer.step("Bild laden und einpassen"):
             size = _layout_size(run_config, components.image_preparer, image)
@@ -268,6 +276,7 @@ class MosaicPipeline:
                 height=size.image_height,
                 pad_color=materials.pad_color.rgb,
             )
+            detail = _detail_image(components, image, size, materials, run_config.frame.width)
         with timer.step("Dithering"):
             grid, palette = _dither(components, rgb, palette, run_config.palette.max_colors)
             grid, palette = apply_frame(
@@ -277,8 +286,29 @@ class MosaicPipeline:
                 materials.frame_color,
                 materials.corner_color,
             )
+        with timer.step("Relief und Formteile"):
+            height, width = grid.shape
+            image_area = ~frame_mask(height, width, run_config.frame.width)
+            levels = relief_levels(
+                np.where(image_area, grid, EMPTY_CELL).astype(np.intp),
+                palette,
+                run_config.relief.mode,
+                run_config.relief.levels,
+            )
+            shaped = _shape_sections(
+                components,
+                grid,
+                image_area,
+                detail,
+                palette,
+                catalog,
+                levels,
+                materials,
+                run_config,
+            )
+            grid = _with_shape_colors(grid, palette, shaped.parts)
         with timer.step("Zerlegung in Teile"):
-            layers = _tile_layers(components, grid, palette, catalog, run_config)
+            layers = _tile_layers(components, grid, palette, catalog, run_config, levels, shaped)
             substrate, connectors = _substrate_layers(materials, size, run_config)
         stats = _stats(size, layers, substrate, connectors, timer.durations)
         mosaic = Mosaic(
@@ -290,6 +320,7 @@ class MosaicPipeline:
             placements=layers.image,
             frame=layers.frame,
             supports=layers.supports,
+            relief=layers.relief,
             substrate=substrate,
             connectors=connectors,
             element_ids=catalog.element_ids,
@@ -330,6 +361,12 @@ class _Materials:
     pad_color: LegoColor
     substrate: tuple[PartType, LegoColor] | None
     connector: tuple[PartType, LegoColor] | None
+    relief_color: LegoColor | None  # Farbe der Stützlagen unter erhöhten Bildteilen
+
+    @property
+    def ground_color(self) -> LegoColor | None:
+        """Was in den Lücken der Formteile auf Höhe 0 zu sehen ist (der Unterbau)."""
+        return self.substrate[1] if self.substrate else None
 
     @classmethod
     def resolve(cls, catalog: PartCatalog, config: AppConfig) -> _Materials:
@@ -349,7 +386,12 @@ class _Materials:
         if pad_color is None:
             raise ConfigError(f"Die Randfarbe {config.mosaic.pad_color_id} ist unbekannt.")
         substrate, connector = _substrate_materials(catalog, config)
-        return cls(frame_color, corner_color, pad_color, substrate, connector)
+        relief_color = None
+        if config.relief.mode is not ReliefMode.NONE:
+            relief_color = require_single_stud_color(
+                catalog, relief_color_id(config), (PartKind.PLATE,), "Farbe der Relief-Stützlagen"
+            )
+        return cls(frame_color, corner_color, pad_color, substrate, connector, relief_color)
 
 
 def _substrate_materials(
@@ -374,11 +416,13 @@ def _layout_size(config: AppConfig, preparer: ImagePreparer, image: Path | bytes
         size = grid_layout_size(layout.plate_studs, layout.plates_wide, layout.plates_high, frame)
     else:
         width, height = layout.width_studs, layout.height_studs
-        if width is None or height is None:
-            ratio = preparer.inspect(image).aspect_ratio
-            width, height = complete_size(width, height, ratio, frame)
-            logger.info("Größe aus dem Seitenverhältnis: %d × %d Noppen.", width, height)
-        size = custom_layout_size(width, height, layout.plate_studs, frame)
+        # Mit Unterbau nur ganze Platten: Kein Paneel steht über, keins fehlt
+        snap = None if layout.substrate is Substrate.NONE else layout.plate_studs
+        ratio = 1.0 if width and height else preparer.inspect(image).aspect_ratio
+        size_studs = complete_size(width, height, ratio, frame, snap)
+        if size_studs != (width, height):
+            logger.info("Größe angepasst: %d × %d Noppen.", *size_studs)
+        size = custom_layout_size(*size_studs, layout.plate_studs, frame)
     if layout.substrate is Substrate.BASEPLATE and size.plates_wide * size.plates_high > 1:
         logger.warning(
             "Mehrere Grundplatten liegen nur lose nebeneinander. Für ein stabiles Bild "
@@ -389,11 +433,12 @@ def _layout_size(config: AppConfig, preparer: ImagePreparer, image: Path | bytes
 
 @dataclass(frozen=True, slots=True)
 class _Layers:
-    """Zerlegte Lagen: Bild (pro Abschnitt), Rahmen und Stützteile darunter."""
+    """Zerlegte Lagen: Bild (pro Abschnitt), Rahmen, Stützteile darunter und Relief."""
 
     image: tuple[Placement, ...]
     frame: tuple[Placement, ...]
     supports: tuple[Placement, ...]
+    relief: tuple[Placement, ...] = ()
 
 
 def _tile_layers(
@@ -402,21 +447,34 @@ def _tile_layers(
     palette: tuple[LegoColor, ...],
     catalog: PartCatalog,
     config: AppConfig,
+    levels: IndexGrid,
+    shaped: ShapeResult,
 ) -> _Layers:
     """Zerlegt Bild und Rahmen getrennt; ein erhöhter Rahmen bekommt Stützlagen.
 
     Der Rahmen wird am Stück zerlegt (seine Teile dürfen Abschnittsgrenzen und
-    Plattennähte überbrücken), das Bild pro Abschnitt.
+    Plattennähte überbrücken), das Bild pro Abschnitt und pro Relief-Stufe: Ein Teil
+    darf nie über eine Stufe reichen. Formteile stehen schon fest und bleiben frei;
+    ihre Unterlagen kommen zu den Relief-Lagen (sie werden vorher gebaut).
     """
     height, width = grid.shape
     ring = frame_mask(height, width, config.frame.width)
     section = config.instructions.section_studs
     size = section if config.tiling.split_sections else max(height, width)
-    # np.where(Bedingung, a, b): pro Zelle a, wo die Bedingung gilt, sonst b
-    image_grid = np.where(ring, EMPTY_CELL, grid).astype(np.intp)
-    image = _tile_sections(components.tiler, image_grid, palette, catalog, size)
+    free = ~ring
+    for placement in shaped.parts:
+        for cell in placement.cells():
+            free[cell] = False
+    image = list(_lift(shaped.parts, levels))
+    for level in np.unique(levels[free]).tolist():
+        # np.where(Bedingung, a, b): pro Zelle a, wo die Bedingung gilt, sonst b
+        level_grid = np.where(free & (levels == level), grid, EMPTY_CELL).astype(np.intp)
+        tiled = _tile_sections(components.tiler, level_grid, palette, catalog, size)
+        image += [replace(p, bottom_ldu=level * PLATE_HEIGHT_LDU) for p in tiled]
+    relief = _relief_supports(components.support_tiler, levels, ~ring, catalog, config, size)
+    relief += tuple(_lift(shaped.underlays, levels))
     if not ring.any():
-        return _Layers(image, (), ())
+        return _Layers(tuple(image), (), (), relief)
     raise_ldu = config.frame.raise_plates * PLATE_HEIGHT_LDU
     frame_grid = np.where(ring, grid, EMPTY_CELL).astype(np.intp)
     frame = tuple(
@@ -424,7 +482,130 @@ def _tile_layers(
         for placement in components.frame_tiler.tile(frame_grid, palette, catalog)
     )
     supports = _supports(components.support_tiler, ring, palette, catalog, config)
-    return _Layers(image, frame, supports)
+    return _Layers(tuple(image), frame, supports, relief)
+
+
+def _lift(placements: Iterable[Placement], levels: IndexGrid) -> Iterator[Placement]:
+    """Hebt Teile um die Relief-Höhe ihrer Startzelle an (ihre eigene Höhe bleibt erhalten)."""
+    for placement in placements:
+        level = int(levels[placement.row, placement.col])
+        yield replace(placement, bottom_ldu=placement.bottom_ldu + level * PLATE_HEIGHT_LDU)
+
+
+def _relief_supports(
+    tiler: TilingStrategy,
+    levels: IndexGrid,
+    image_area: npt.NDArray[np.bool_],
+    catalog: PartCatalog,
+    config: AppConfig,
+    section_studs: int,
+) -> tuple[Placement, ...]:
+    """Plates unter erhöhten Bildteilen: Lage k liegt überall dort, wo die Höhe größer als k ist.
+
+    Zerlegt wird pro Abschnitt, damit jede Lage zu genau einem Bauabschnitt gehört.
+    """
+    top = int(levels.max(initial=0))
+    if top == 0:
+        return ()
+    color = catalog.colors[relief_color_id(config)]
+    placements: list[Placement] = []
+    for level in range(top):
+        layer = np.where(image_area & (levels > level), 0, EMPTY_CELL).astype(np.intp)
+        placements += [
+            replace(p, bottom_ldu=level * PLATE_HEIGHT_LDU)
+            for p in _tile_sections(tiler, layer, (color,), catalog, section_studs)
+        ]
+    return tuple(placements)
+
+
+def _detail_image(
+    components: PipelineComponents,
+    image: Path | bytes,
+    size: LayoutSize,
+    materials: _Materials,
+    frame_width: int,
+) -> FloatImage | None:
+    """Bild in ``subsample``-facher Auflösung im Lab-Raum, auf die ganze Mosaikfläche gebracht.
+
+    Nur die Formwahl braucht es; die Rahmenzellen bleiben 0 (sie werden nie bewertet).
+    """
+    s = components.shaper.subsample
+    if s == 0:
+        return None
+    rgb = components.image_preparer.prepare(
+        image,
+        width=size.image_width * s,
+        height=size.image_height * s,
+        pad_color=materials.pad_color.rgb,
+    )
+    lab = components.color_space.to_lab(rgb.astype(np.float64))
+    border = frame_width * s
+    # np.pad: auf allen Seiten ``border`` Zeilen/Spalten mit 0 anhängen (nur Höhe und Breite)
+    return np.pad(lab, ((border, border), (border, border), (0, 0)))
+
+
+def _shape_sections(
+    components: PipelineComponents,
+    grid: IndexGrid,
+    image_area: npt.NDArray[np.bool_],
+    detail: FloatImage | None,
+    palette: tuple[LegoColor, ...],
+    catalog: PartCatalog,
+    levels: IndexGrid,
+    materials: _Materials,
+    config: AppConfig,
+) -> ShapeResult:
+    """Formwahl pro Bauabschnitt (wie die Zerlegung): Kein Formteil ragt in einen anderen."""
+    shaper = components.shaper
+    ground = materials.ground_color or materials.pad_color
+    raised = materials.relief_color or ground
+    to_lab = components.color_space.to_lab
+    ground_lab, raised_lab = (
+        to_lab(np.array([c.rgb], dtype=np.float64))[0] for c in (ground, raised)
+    )
+    background = np.where((levels > 0)[..., None], raised_lab, ground_lab)
+    palette_lab = to_lab(np.array([c.rgb for c in palette], dtype=np.float64))
+    masked = np.where(image_area, grid, EMPTY_CELL).astype(np.intp)
+    height, width = grid.shape
+    s = shaper.subsample
+    parts: list[Placement] = []
+    underlays: list[Placement] = []
+    for section in split_sections(width, height, config.instructions.section_studs):
+        rows = slice(section.row, section.row + section.rows)
+        cols = slice(section.col, section.col + section.cols)
+        sub_detail = None
+        if detail is not None:
+            sub_detail = detail[rows.start * s : rows.stop * s, cols.start * s : cols.stop * s]
+        found = shaper.refine(
+            masked[rows, cols],
+            sub_detail,
+            palette,
+            palette_lab,
+            catalog,
+            levels=levels[rows, cols],
+            background_lab=background[rows, cols],
+        )
+        parts += _moved(found.parts, section.row, section.col)
+        underlays += _moved(found.underlays, section.row, section.col)
+    return ShapeResult(tuple(parts), tuple(underlays))
+
+
+def _moved(placements: Iterable[Placement], rows: int, cols: int) -> list[Placement]:
+    """Verschiebt Teile aus einem Teilraster an ihre echte Position im Mosaik."""
+    return [replace(p, row=p.row + rows, col=p.col + cols) for p in placements]
+
+
+def _with_shape_colors(
+    grid: IndexGrid, palette: tuple[LegoColor, ...], shaped: Sequence[Placement]
+) -> IndexGrid:
+    """Raster mit den Farben der Formteile (die Formwahl darf die Farbe ändern)."""
+    if not shaped:
+        return grid
+    result = grid.copy()
+    for placement in shaped:
+        for cell in placement.cells():
+            result[cell] = palette.index(placement.color)
+    return result
 
 
 def _supports(
@@ -476,8 +657,13 @@ def _substrate_layers(
     return plates, pins
 
 
-def _palette(catalog: PartCatalog, config: AppConfig) -> tuple[LegoColor, ...]:
-    """Palette laut Konfiguration; leer ist ein Konfigurationsfehler."""
+def _palette(
+    catalog: PartCatalog, config: AppConfig, shaper: ShapeRefiner
+) -> tuple[LegoColor, ...]:
+    """Palette laut Konfiguration; leer ist ein Konfigurationsfehler.
+
+    Der Stil (``shaper``) kann Farben ausschließen, z. B. „punkte“ alle ohne rundes Tile.
+    """
     palette = build_palette(
         catalog,
         config.palette.part_kinds,
@@ -485,6 +671,7 @@ def _palette(catalog: PartCatalog, config: AppConfig) -> tuple[LegoColor, ...]:
         include_color_ids=config.palette.include_color_ids,
         exclude_color_ids=config.palette.exclude_color_ids,
     )
+    palette = tuple(color for color in palette if shaper.accepts(color, catalog))
     if not palette:
         raise ConfigError(
             "Mit den gewählten Teilarten und Farbkategorien bleibt keine Farbe übrig."
@@ -552,6 +739,7 @@ def _stats(
     """Kennzahlen des Laufs als JSON-fähiges dict."""
     surface = layers.frame + layers.image
     tiling = TilingStats.from_placements(size.width, size.height, surface)
+    shaped = sum(1 for placement in layers.image if placement.part.is_shaped)
     return {
         "breite": size.width,
         "hoehe": size.height,
@@ -560,6 +748,8 @@ def _stats(
         "farben": len({placement.color.id for placement in surface}),
         **asdict(tiling),  # pixels, parts, savings_percent
         "stuetzteile": len(layers.supports),
+        "formteile": shaped,
+        "relief_teile": len(layers.relief),
         "unterbau_platten": len(substrate),
         "verbinder": len(connectors),
         "dauer_sekunden": dict(durations),

@@ -20,7 +20,7 @@ einer Seite; passen zwei Schritte auf eine Seite, stehen sie untereinander.
 import functools
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 lazy from PIL import Image, ImageDraw, ImageFont
@@ -42,6 +42,7 @@ from lego_mosaik.domain.sections import (
     assembly_steps,
     split_sections,
 )
+from lego_mosaik.domain.shapes import cell_outline, stud_visible
 from lego_mosaik.outputs.iso_render import Area, IsoView, RenderCell, Underlay, render_iso
 from lego_mosaik.outputs.plans import (
     connection_plan,
@@ -99,6 +100,11 @@ _CONNECTOR_HINT = (
 _SUPPORT_HINT = (
     "Die Plates liegen auf Lücke: Sie überbrücken die Nähte zwischen den Platten "
     "und heben den Rahmen über das Bild."
+)
+_RELIEF_HINT = "Diese Plates heben die Bildteile darüber an (Relief)."
+_SHAPES_HINT = (
+    "Runde und schräge Teile lassen den Untergrund durchscheinen. Auf die Drehung "
+    "achten: Sie ist in der Ansicht zu sehen."
 )
 
 
@@ -185,8 +191,7 @@ class _DocumentBuilder:
         )
         # Jede sichtbare oder stützende Platzierung bekommt eine Nummer; daran
         # erkennt der Renderer Teilgrenzen (Unterbau und Pins rendert er anders)
-        stacked = mosaic.supports + mosaic.surface
-        self.part_ids = {placement: index for index, placement in enumerate(stacked)}
+        self.part_ids = {placement: index for index, placement in enumerate(mosaic.stacked)}
         self.icons = _IconCache(layout)
         self.underlay = _underlay(mosaic.substrate)
         self.full_area = Area(0, 0, mosaic.height, mosaic.width)
@@ -197,7 +202,7 @@ class _DocumentBuilder:
         built: list[Placement] = []  # was schon steht (für 3D-Ansichten und Karten)
         previous_section = 0
         for number, step in enumerate(self.steps, start=1):
-            if step.kind is StepKind.SECTION and step.section is not None:
+            if step.section is not None:  # Bild- und Reliefschritte gehören zum Abschnitt
                 if step.section.number != previous_section:
                     doc += [PAGE_BREAK, self.section_intro(step.section, built)]
                     previous_section = step.section.number
@@ -220,7 +225,7 @@ class _DocumentBuilder:
             _text_block(mosaic.title, layout.font(TITLE_SIZE), layout.content_width),
             self.finished_render,
             _text_block(facts, layout.font(BODY_SIZE), layout.content_width),
-            self.section_map(mosaic.surface, None, COVER_MAP_PX),
+            self.section_map(mosaic.stacked, None, COVER_MAP_PX),
         )
 
     @functools.cached_property
@@ -232,7 +237,7 @@ class _DocumentBuilder:
         """
         large = self.mosaic.width * self.mosaic.height > LARGE_RENDER_CELLS
         return render_iso(
-            self.cells(self.mosaic.supports + self.mosaic.surface, self.full_area),
+            self.cells(self.mosaic.stacked, self.full_area),
             self.full_area,
             self.layout.view,
             underlay=self.underlay,
@@ -326,11 +331,13 @@ class _DocumentBuilder:
             max_height=self.layout.step_render_height,
             supersample=self.layout.supersample,
         )
-        first_row = min(p.row for p in step.placements) + 1
-        last_row = max(p.row + p.rows_spanned for p in step.placements)
-        subtitle = f"Abschnitt {section.number} · Zeilen {first_row}–{last_row}"
         entries = PartsList.from_placements(step.placements).entries
-        return self.step_header(number, subtitle), self.callout(entries), render
+        head = (self.step_header(number, _section_subtitle(step, section)), self.callout(entries))
+        if step.kind is StepKind.RELIEF:
+            return (*head, self.hint(_RELIEF_HINT), render)
+        if any(placement.part.is_shaped for placement in step.placements):
+            return (*head, self.hint(_SHAPES_HINT), render)
+        return (*head, render)
 
     def finished(self) -> Unit:
         """Schlussseite: das ganze Mosaik und was es zusammenhält."""
@@ -343,6 +350,8 @@ class _DocumentBuilder:
             )
         if mosaic.supports:
             text += " Der erhöhte Rahmen überbrückt zusätzlich alle Nähte am Rand."
+        if mosaic.relief:
+            text += f" {len(mosaic.relief)} Plates geben dem Bild Relief."
         return (
             _text_block(text, self.layout.font(HEADING_SIZE), self.layout.content_width),
             self.finished_render,
@@ -389,7 +398,7 @@ class _DocumentBuilder:
         Spätere Teile überschreiben frühere in derselben Zelle (der Rahmen liegt auf
         seinen Stützteilen und ist höher, also gewinnt er).
         """
-        result = {}
+        result: dict[tuple[int, int], RenderCell] = {}
         for placement in placements:
             if not _overlaps(placement, area):
                 continue  # schneller Rechteck-Test statt jede Zelle einzeln zu prüfen
@@ -402,7 +411,9 @@ class _DocumentBuilder:
             )
             for row, col in placement.cells():
                 if area.contains(row, col):
-                    result[(row, col)] = content
+                    cell = _cell_content(content, placement, row, col, result.get((row, col)))
+                    if cell is not None:
+                        result[(row, col)] = cell
         return result
 
     def section_map(
@@ -420,6 +431,35 @@ class _DocumentBuilder:
             background=UNBUILT_RGB,
             current=current,
         )
+
+
+def _cell_content(
+    content: RenderCell, placement: Placement, row: int, col: int, below: RenderCell | None
+) -> RenderCell | None:
+    """Inhalt einer Zelle; Formteile bekommen ihren Umriss und behalten, was darunter liegt.
+
+    ``None``: Das Formteil berührt die Zelle nicht (z. B. die freie Ecke eines Dreiecks).
+    """
+    part = placement.part
+    if not part.is_shaped:
+        return content
+    d_row, d_col = row - placement.row, col - placement.col
+    outline = cell_outline(part.shape, placement.turns, d_row, d_col)
+    if outline is None:
+        return None
+    has_stud = part.kind is not PartKind.TILE and stud_visible(
+        part.shape, placement.turns, d_row, d_col
+    )
+    return replace(content, outline=outline, has_stud=has_stud, below=below)
+
+
+def _section_subtitle(step: BuildStep, section: Section) -> str:
+    """Z. B. „Abschnitt 3 · Zeilen 1–4“ oder „Abschnitt 3 · Relief, Lage 1“."""
+    if step.kind is StepKind.RELIEF:
+        return f"Abschnitt {section.number} · Relief, Lage {step.level + 1}"
+    first_row = min(p.row for p in step.placements) + 1
+    last_row = max(p.row + p.rows_spanned for p in step.placements)
+    return f"Abschnitt {section.number} · Zeilen {first_row}–{last_row}"
 
 
 def _base_title(step: BuildStep) -> str:
@@ -511,7 +551,13 @@ def render_part(
         has_stud=part.kind is not PartKind.TILE,
         top_ldu=part.height_ldu,
     )
-    cells = {(row, col): content for row in range(area.rows) for col in range(area.cols)}
+    icon_part = Placement(part, color, 0, 0)
+    cells = {
+        (row, col): cell
+        for row in range(area.rows)
+        for col in range(area.cols)
+        if (cell := _cell_content(content, icon_part, row, col, None)) is not None
+    }
     return render_iso(
         cells,
         area,

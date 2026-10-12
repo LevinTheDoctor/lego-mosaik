@@ -9,6 +9,7 @@ Ergebnis in ``ausgabe/orientierung/``:
 - ``mosaik.ldr``: Testmodell ohne Unterbau
 - ``mit_grundplatte/mosaik.ldr``: dasselbe auf einer Grundplatte 32 × 32
 - ``art_paneele/mosaik.ldr``: zwei LEGO-Art-Paneele mit Technic-Pins und erhöhtem Rahmen
+- ``formteile/mosaik.ldr`` und ``formteile/vorschau.png``: alle Formteile in vier Drehungen
 - ``vorschau.png``: so soll das Modell in Studio von oben aussehen
 
 Inhalt (12 × 8 Noppen), oben = Bildzeile 0:
@@ -26,6 +27,11 @@ Im Modell ``art_paneele`` bitte prüfen (die Werte sind Annahmen):
   → Achse: ``ldraw_long_axis`` in ``daten/teil_geometrie.csv``;
   Höhe: ``connector_depth_ldu`` in ``CONFIG.layout``; Lage: ``pins_per_seam``
 - Der Rahmen (Tiles auf einer Lage Plates) steht eine Plate über dem Bild
+
+Im Modell ``formteile`` von oben mit ``formteile/vorschau.png`` vergleichen. Zeilen von
+oben: Viertelkreis, Halbkreis, Dreieck 2 × 2, Cut-Corner-Wedge 2 × 2; von links nach
+rechts 0, 1, 2 und 3 Vierteldrehungen im Uhrzeigersinn. Weicht eine Zeile ab, stimmt
+die Grundlage in ``domain/shapes.py`` für dieses Teil nicht.
 """
 
 import dataclasses
@@ -41,7 +47,7 @@ from lego_mosaik.domain.layout import (
     grid_layout_size,
     substrate_placements,
 )
-from lego_mosaik.domain.models import PLATE_HEIGHT_LDU, Mosaic, PartKind, Placement
+from lego_mosaik.domain.models import PLATE_HEIGHT_LDU, Mosaic, PartKind, PartShape, Placement
 from lego_mosaik.main import CONFIG, build_catalog_source
 from lego_mosaik.outputs.ldraw import LdrawWriter
 from lego_mosaik.outputs.preview_png import PreviewPngWriter
@@ -109,11 +115,29 @@ def build_art_mosaic(test: Mosaic) -> Mosaic:
     )
 
 
+# Formteile für das Modell „formteile“: (Teil, erste Zeile, Abstand der Spalten)
+SHAPED_ROWS = (("25269", 0, 3), ("24246", 2, 3), ("35787", 4, 3), ("26601", 6, 3))
+
+
+def build_shapes_mosaic(test: Mosaic) -> Mosaic:
+    """Jedes Formteil in vier Drehungen nebeneinander, rot auf der Grundplatte."""
+    catalog = build_catalog_source(SourceConfig(data_dir=Path("daten/rebrickable"))).load_catalog()
+    parts, colors = catalog.part_types, catalog.colors
+    placements = tuple(
+        Placement(parts[part], colors[RED], row, turns * step, turns=turns)
+        for part, row, step in SHAPED_ROWS
+        for turns in range(4)
+    )
+    assert all(p.part.shape is not PartShape.SQUARE for p in placements)
+    return dataclasses.replace(test, title="Orientierungstest Formteile", placements=placements)
+
+
 def main() -> None:
     """Schreibt die Prüfdateien."""
     with_baseplate = build_test_mosaic()
     without_baseplate = dataclasses.replace(with_baseplate, substrate=())
     art = build_art_mosaic(with_baseplate)
+    shapes = build_shapes_mosaic(with_baseplate)
     writer = LdrawWriter(
         rows_per_step=2,
         section_studs=WIDTH,
@@ -123,10 +147,13 @@ def main() -> None:
         (TARGET_DIR, without_baseplate),
         (TARGET_DIR / "mit_grundplatte", with_baseplate),
         (TARGET_DIR / "art_paneele", art),
+        (TARGET_DIR / "formteile", shapes),
     ):
         folder.mkdir(parents=True, exist_ok=True)
         writer.write(mosaic, folder)
-    PreviewPngWriter(stud_px=32, draw_part_edges=True).write(without_baseplate, TARGET_DIR)
+    preview = PreviewPngWriter(stud_px=32, draw_part_edges=True)
+    preview.write(without_baseplate, TARGET_DIR)
+    preview.write(shapes, TARGET_DIR / "formteile")
     print(f"Prüfdateien geschrieben nach {TARGET_DIR.resolve()}")
 
 

@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 lazy from PIL import Image, ImageDraw, ImageFont
 
-from lego_mosaik.domain.models import Placement, RgbTuple
+from lego_mosaik.domain.models import PartKind, Placement, RgbTuple
+from lego_mosaik.domain.shapes import outline, stud_visible
 
 type Font = ImageFont.FreeTypeFont | ImageFont.ImageFont
 """TrueType-Schrift oder Pillows eingebaute Ersatzschrift."""
@@ -45,6 +46,9 @@ def render_placements(
 ) -> Image.Image:
     """Zeichnet Teile als Noppen-Quadrate mit angedeutetem Noppenkreis.
 
+    Formteile werden mit ihrem Umriss gezeichnet; daneben bleibt sichtbar, was vorher
+    gezeichnet wurde (Hintergrund bzw. Relief-Stützlage), genau wie beim echten Bild.
+
     Args:
         placements: Die zu zeichnenden Teile (spätere übermalen frühere).
         region: Der zu zeichnende Ausschnitt; Zellen außerhalb werden übersprungen.
@@ -56,6 +60,9 @@ def render_placements(
     draw = ImageDraw.Draw(image)
     placements = list(placements)  # wird zweimal durchlaufen, daher in eine Liste
     for placement in placements:
+        if placement.part.is_shaped:
+            _draw_shape(draw, placement, stud_px, region)
+            continue
         for row, col in placement.cells():
             if (
                 region.row <= row < region.row + region.rows
@@ -65,8 +72,42 @@ def render_placements(
                 _draw_stud(draw, *cell, stud_px, placement.color.rgb)
     if draw_part_edges:
         for placement in placements:
-            draw.rectangle(part_box(placement, stud_px, region), outline=EDGE_RGB)
+            if placement.part.is_shaped:
+                draw.polygon(_shape_points(placement, stud_px, region), outline=EDGE_RGB)
+            else:
+                draw.rectangle(part_box(placement, stud_px, region), outline=EDGE_RGB)
     return image
+
+
+def _shape_points(placement: Placement, stud_px: int, region: Region) -> list[tuple[float, float]]:
+    """Umriss eines Formteils in Pixeln relativ zum Ausschnitt."""
+    left, top = (placement.col - region.col) * stud_px, (placement.row - region.row) * stud_px
+    return [
+        (left + x * stud_px, top + y * stud_px)
+        for x, y in outline(placement.part.shape, placement.turns)
+    ]
+
+
+def _draw_shape(
+    draw: ImageDraw.ImageDraw, placement: Placement, stud_px: int, region: Region
+) -> None:
+    """Formteil als gefülltes Polygon; Plates bekommen ihre ganzen Noppen eingezeichnet."""
+    rgb = placement.color.rgb
+    draw.polygon(_shape_points(placement, stud_px, region), fill=rgb)
+    if placement.part.kind is PartKind.TILE:
+        return
+    inset = round(stud_px * STUD_INSET_RATIO)
+    for row, col in placement.cells():
+        d_row, d_col = row - placement.row, col - placement.col
+        if stud_visible(placement.part.shape, placement.turns, d_row, d_col):
+            left, top = (col - region.col) * stud_px, (row - region.row) * stud_px
+            circle = (
+                left + inset,
+                top + inset,
+                left + stud_px - 1 - inset,
+                top + stud_px - 1 - inset,
+            )
+            draw.ellipse(circle, outline=shade(rgb), width=max(1, stud_px // 16))
 
 
 def part_box(

@@ -3,6 +3,7 @@
 Reine Funktionen auf Domain-Objekten, ohne Abhängigkeit zu Konfiguration oder I/O.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -52,6 +53,77 @@ class LayoutSize:
     plates_high: int
 
 
+@dataclass(frozen=True, slots=True)
+class ArtFormat:
+    """Ein Format als Raster aus Unterbau-Platten (immer lückenlos baubar).
+
+    Attributes:
+        name: Kurzname für CLI, API und Menü, z. B. „quadrat“.
+        plates_wide: Platten nebeneinander.
+        plates_high: Platten untereinander.
+        description: Deutsche Beschreibung.
+    """
+
+    name: str
+    plates_wide: int
+    plates_high: int
+    description: str
+
+    @property
+    def aspect_ratio(self) -> float:
+        """Breite / Höhe."""
+        return self.plates_wide / self.plates_high
+
+
+# Formate in Platten; mit LEGO-Art-Paneelen (16 Noppen) ergibt „quadrat“ 48 × 48 Noppen
+FORMATS: tuple[ArtFormat, ...] = (
+    ArtFormat("mini", 1, 1, "ein Paneel, z. B. Untersetzer oder Testbild"),
+    ArtFormat("klein", 2, 2, "kleines Quadrat"),
+    ArtFormat("quadrat", 3, 3, "wie die meisten LEGO-Art-Sets"),
+    ArtFormat("gross", 4, 4, "großes Quadrat"),
+    ArtFormat("riesig", 5, 5, "sehr großes Quadrat"),
+    ArtFormat("quer", 4, 3, "Querformat 4:3"),
+    ArtFormat("hoch", 3, 4, "Hochformat 3:4"),
+    ArtFormat("breit", 6, 4, "Querformat 3:2, wie ein Foto"),
+    ArtFormat("panorama", 6, 3, "Panorama 2:1"),
+    ArtFormat("weltkarte", 8, 5, "wie LEGO Art Weltkarte (31203), 40 Paneele"),
+)
+
+
+def find_format(name: str) -> ArtFormat:
+    """Format zum Namen.
+
+    Raises:
+        ConfigError: Bei unbekanntem Namen, mit allen gültigen Namen.
+    """
+    for art_format in FORMATS:
+        if art_format.name == name.strip().lower():
+            return art_format
+    valid = ", ".join(art_format.name for art_format in FORMATS)
+    raise ConfigError(f"Unbekanntes Format „{name}“. Gültig sind: {valid}.")
+
+
+def suggest_formats(aspect_ratio: float, count: int = 3) -> tuple[ArtFormat, ...]:
+    """Die Formate, deren Seitenverhältnis dem Bild am nächsten kommt (wenig Zuschnitt).
+
+    Verglichen wird logarithmisch: 2:1 und 1:2 sind gleich weit von 1:1 entfernt.
+    """
+    ranked = sorted(
+        FORMATS,
+        key=lambda f: (abs(math.log(f.aspect_ratio / aspect_ratio)), f.plates_wide * f.plates_high),
+    )
+    return tuple(ranked[:count])
+
+
+def snap_to_plates(studs: int, plate_studs: int) -> int:
+    """Rundet auf ganze Platten (mindestens eine), damit der Unterbau genau passt.
+
+    Beispiel: 40 Noppen auf 16er-Paneelen → 48 (drei Paneele), 23 → 16.
+    """
+    plates = max(1, math.floor(studs / plate_studs + 0.5))  # kaufmännisch runden
+    return plates * plate_studs
+
+
 def grid_layout_size(
     plate_studs: int, plates_wide: int, plates_high: int, frame_width: int
 ) -> LayoutSize:
@@ -63,8 +135,9 @@ def grid_layout_size(
 def custom_layout_size(width: int, height: int, plate_studs: int, frame_width: int) -> LayoutSize:
     """Freie Größe in Noppen; der Unterbau braucht dafür aufgerundet viele Platten.
 
-    Beispiel: 40 Noppen Breite auf 16er-Paneelen → 3 Paneele (48 Noppen), die
-    rechts 8 Noppen überstehen.
+    Mit Unterbau rastet die Pipeline die Größe vorher auf ganze Platten ein
+    (``snap_to_plates``); ohne Unterbau ist jede Größe baubar und die Platten zählen
+    hier nur für die Abschnitte.
     """
     # -(-a // b) ist die aufgerundete Ganzzahl-Division (// rundet sonst ab)
     plates_wide, plates_high = -(-width // plate_studs), -(-height // plate_studs)
@@ -79,7 +152,11 @@ def _size(width: int, height: int, frame: int, plates_wide: int, plates_high: in
 
 
 def complete_size(
-    width: int | None, height: int | None, aspect_ratio: float, frame_width: int
+    width: int | None,
+    height: int | None,
+    aspect_ratio: float,
+    frame_width: int,
+    plate_studs: int | None = None,
 ) -> tuple[int, int]:
     """Ergänzt eine fehlende Seite so, dass die Bildfläche das Seitenverhältnis des Bilds hat.
 
@@ -88,17 +165,25 @@ def complete_size(
         height: Gewünschte Gesamthöhe oder ``None``.
         aspect_ratio: Breite / Höhe des Bilds (z. B. 1.5 bei 3:2 quer).
         frame_width: Rahmenbreite in Noppen (gehört nicht zur Bildfläche).
+        plate_studs: Mit Unterbau die Plattengröße: Beide Seiten rasten dann auf ganze
+            Platten ein, die gegebene zuerst, die berechnete danach.
 
     Raises:
         ConfigError: Wenn beide Seiten fehlen.
     """
+
+    def snap(studs: int) -> int:
+        return studs if plate_studs is None else snap_to_plates(studs, plate_studs)
+
     frame = 2 * frame_width
     if width is not None and height is not None:
-        return width, height
+        return snap(width), snap(height)
     if width is not None:
-        return width, round((width - frame) / aspect_ratio) + frame
+        width = snap(width)
+        return width, snap(round((width - frame) / aspect_ratio) + frame)
     if height is not None:
-        return round((height - frame) * aspect_ratio) + frame, height
+        height = snap(height)
+        return snap(round((height - frame) * aspect_ratio) + frame), height
     raise ConfigError("Für eine freie Größe bitte Breite, Höhe oder beides angeben.")
 
 

@@ -20,6 +20,7 @@ lazy from rich.table import Table
 from lego_mosaik.config import (
     COLOR_DISTANCE_LABELS,
     FIT_MODE_LABELS,
+    RELIEF_LABELS,
     SUBSTRATE_LABELS,
     AppConfig,
     OverrideInput,
@@ -30,7 +31,13 @@ from lego_mosaik.config import (
     substrate_color_id,
 )
 from lego_mosaik.domain.errors import LegoMosaicError
-from lego_mosaik.interfaces.display import mosaic_preview, print_palette, print_summary
+from lego_mosaik.domain.layout import FORMATS, suggest_formats
+from lego_mosaik.interfaces.display import (
+    mosaic_preview,
+    print_formats,
+    print_palette,
+    print_summary,
+)
 lazy from lego_mosaik.imaging.protocol import ImageInfo
 lazy from lego_mosaik.pipeline import MosaicPipeline
 
@@ -40,6 +47,9 @@ RESET = "-"  # Eingabe, die einen Wert auf den Standard aus der Konfiguration zu
 EXIT_CHOICES = frozenset({"0", "q", "beenden"})
 YES = frozenset({"j", "ja", "y", "yes"})
 NO = frozenset({"n", "nein", "no"})
+# Format und eigene Größe schließen sich aus: Wer das eine ändert, setzt das andere zurück
+FORMAT_FIELD = "art_format"
+SIZE_FIELDS = ("plates", "width_studs", "height_studs")
 
 type PipelineFactory = Callable[[AppConfig], MosaicPipeline]
 type Convert = Callable[[str], object]
@@ -76,6 +86,15 @@ def _or_dash(value: object) -> object:
     return "–" if value is None else value
 
 
+def _format_name(config: AppConfig) -> str:
+    """Name des Formats, das zur aktuellen Plattenzahl passt (sonst „–“)."""
+    layout = config.layout
+    if layout.custom_size:
+        return "–"
+    grid = (layout.plates_wide, layout.plates_high)
+    return next((f.name for f in FORMATS if (f.plates_wide, f.plates_high) == grid), "–")
+
+
 # Menügruppen: Titel → Fragen. Die lambdas lesen den aktuell wirksamen Wert aus der
 # Laufkonfiguration (c) bzw. aus den Eingaben (i), damit Enter „beibehalten“ heißt.
 GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
@@ -95,6 +114,12 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
                 lambda c, i: c.layout.plate_studs,
             ),
             _Field(
+                FORMAT_FIELD,
+                "Format, z. B. quadrat, quer, weltkarte (statt Platten)",
+                str,
+                lambda c, i: _format_name(c),
+            ),
+            _Field(
                 "plates",
                 "Anzahl Platten als BxH, z. B. 3x3",
                 str,
@@ -102,7 +127,7 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
             ),
             _Field(
                 "width_studs",
-                "Eigene Breite in Noppen (statt Platten)",
+                "Eigene Breite in Noppen (rastet auf ganze Platten ein)",
                 int,
                 lambda c, i: _or_dash(c.layout.width_studs),
             ),
@@ -195,6 +220,29 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
                 "Höchstens so viele Farben (0 = unbegrenzt)",
                 int,
                 lambda c, i: c.palette.max_colors or "unbegrenzt",
+            ),
+        ),
+    ),
+    (
+        "Stil und Relief",
+        (
+            _Field(
+                "style",
+                "Stil: quadrat, formen (Rundungen/Schrägen), punkte (runde Tiles), noppen",
+                str,
+                lambda c, i: c.shapes.style,
+            ),
+            _Field(
+                "relief",
+                "Relief: ohne, motiv (Motiv erhöht), hell oder dunkel (höher)",
+                str,
+                lambda c, i: label_of(RELIEF_LABELS, c.relief.mode),
+            ),
+            _Field(
+                "relief_levels",
+                "Höchste Relief-Stufe in Plates (1–3)",
+                int,
+                lambda c, i: c.relief.levels,
             ),
         ),
     ),
@@ -314,6 +362,7 @@ class InteractiveSession:
             ("Vorschau im Terminal", self.preview),
             ("Mosaik erstellen und Dateien ausgeben", self.create),
             ("Farbpalette anzeigen", self.show_palette),
+            ("Formate anzeigen", self.show_formats),
         )
         for number, entry in enumerate(extra, start=len(GROUPS) + 2):
             actions[str(number)] = entry
@@ -355,6 +404,12 @@ class InteractiveSession:
             f"[green]Bild geladen:[/green] {escape(path.name)}, {self._image_size()}, "
             f"Seitenverhältnis {self.image_info.aspect_ratio:.2f}"
         )
+        studs = self.run_config().layout.plate_studs
+        suggestions = ", ".join(
+            f"{f.name} ({f.plates_wide * studs} × {f.plates_high * studs})"
+            for f in suggest_formats(self.image_info.aspect_ratio)
+        )
+        self.console.print(f"Passende Formate: {suggestions}")
 
     def _image_size(self) -> str:
         info = self.image_info
@@ -374,6 +429,7 @@ class InteractiveSession:
             value = self._ask(field, current)
             if value is not _KEEP:
                 changes[field.name] = value
+        _exclusive_size(changes)
         candidate = replace(self.inputs, **changes)
         # Erst prüfen, dann übernehmen: bei einem Fehler bleiben die alten Eingaben gültig
         apply_overrides(self.config, parse_overrides(candidate))
@@ -442,6 +498,10 @@ class InteractiveSession:
             )
         print_summary(self.console, result)
 
+    def show_formats(self) -> None:
+        """Formate mit Größe in Noppen bei der aktuellen Plattengröße."""
+        print_formats(self.console, self.run_config().layout.plate_studs)
+
     def show_palette(self) -> None:
         """Palette für die aktuell gewählten Teilarten und Farbkategorien."""
         print_palette(self.console, self.pipeline.palette(parse_overrides(self.inputs)))
@@ -450,6 +510,20 @@ class InteractiveSession:
         if self.image is None:
             self.console.print("[yellow]Bitte zuerst ein Bild laden (Menüpunkt 1).[/yellow]")
         return self.image
+
+
+def _exclusive_size(changes: dict[str, Any]) -> None:
+    """Format und eigene Größe schließen sich aus: Die neue Angabe verdrängt die alte.
+
+    Stehen beide neu in ``changes``, bleibt alles, wie es ist; ``parse_overrides``
+    meldet dann den Widerspruch.
+    """
+    new_format = changes.get(FORMAT_FIELD) is not None
+    new_size = any(changes.get(name) is not None for name in SIZE_FIELDS)
+    if new_format and not new_size:
+        changes.update(dict.fromkeys(SIZE_FIELDS))  # None = Größe aus dem Format
+    elif new_size and not new_format:
+        changes[FORMAT_FIELD] = None
 
 
 _KEEP = object()  # Markierung „Wert nicht ändern“ (eindeutig, kann nie eine Eingabe sein)

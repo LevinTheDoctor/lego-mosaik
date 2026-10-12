@@ -18,7 +18,7 @@ x = Spalten nach rechts, z = Zeilen nach vorne (zum Betrachter), y = Höhe.
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 lazy from PIL import Image, ImageDraw
 
@@ -59,6 +59,9 @@ class RenderCell:
         has_stud: True bei Plates und Bricks, False bei Tiles (glatt).
         highlighted: True bei neuen Teilen des aktuellen Schritts (orange Umrandung).
         top_ldu: Höhe der Oberseite über dem Unterbau in LDU (Plate = 8).
+        outline: Nur Formteile: Umriss innerhalb der Zelle (x = Spalte, y = Zeile, je
+            0 bis 1). In den Lücken ist ``below`` bzw. der Unterbau zu sehen.
+        below: Nur Formteile: Was in der Zelle darunter liegt (z. B. eine Relief-Stützlage).
     """
 
     rgb: RgbTuple
@@ -66,6 +69,8 @@ class RenderCell:
     has_stud: bool = True
     highlighted: bool = False
     top_ldu: float = PLATE_HEIGHT
+    outline: tuple[Point2, ...] | None = None
+    below: RenderCell | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,8 +199,17 @@ class _Heights:
 
 
 def _top_of(content: RenderCell | None) -> float:
-    """Oberseite einer Zelle; eine leere Zelle endet auf dem Unterbau (Höhe 0)."""
-    return content.top_ldu if content is not None else 0.0
+    """Oberseite einer Zelle; eine leere Zelle endet auf dem Unterbau (Höhe 0).
+
+    Formteile füllen ihre Zelle nicht: Für die Nachbarn zählt, was darunter liegt.
+    Deren Seitenflächen werden dann gezeichnet und vom Formteil (später gemalt) passend
+    verdeckt.
+    """
+    if content is None:
+        return 0.0
+    if content.outline is not None:
+        return _top_of(content.below)
+    return content.top_ldu
 
 
 @dataclass(slots=True)
@@ -296,6 +310,9 @@ class _Canvas:
         Eine Seite ist sichtbar, soweit die Nachbarsäule davor (bzw. rechts) niedriger
         ist. Bei gleich hohen Nachbarn bleibt sie verdeckt.
         """
+        if content.outline is not None:
+            self._draw_shaped(cell, content, content.outline, cells)
+            return
         row, col = cell
         rgb, top = content.rgb, content.top_ldu
         x0, z0 = col * LDU_PER_STUD, row * LDU_PER_STUD
@@ -358,10 +375,86 @@ class _Canvas:
             base = faces.front_base if front_corner else faces.right_base
             self.line((x1, base, z1), (x1, top, z1), rgb)
 
+    def _draw_shaped(
+        self,
+        cell: Cell,
+        content: RenderCell,
+        outline: Sequence[Point2],
+        cells: Mapping[Cell, RenderCell],
+    ) -> None:
+        """Formteil als Prisma über seinem Umriss: erst was darunter liegt, dann Wände und Deckel.
+
+        Gezeichnet werden nur Wände, die zur Kamera zeigen (von hinten nach vorne), und
+        keine Wände an Zellkanten innerhalb desselben Teils (2 × 2-Teile).
+        """
+        if content.below is not None:  # z. B. Relief-Stützlage; ihre Noppe ist verdeckt
+            self.draw_cell(cell, replace(content.below, has_stud=False), cells)
+        base, top, rgb = _top_of(content), content.top_ldu, content.rgb
+        points = self._world_outline(cell, outline)
+        view = self.view
+        toward = (
+            math.sin(math.radians(view.azimuth_deg)),
+            math.cos(math.radians(view.azimuth_deg)),
+        )
+        walls = []
+        for start, end, internal in self._edges(cell, content, outline, cells):
+            normal = _outward_normal(start, end, clockwise=_signed_area(points) > 0)
+            facing = normal[0] * toward[0] + normal[1] * toward[1]
+            if facing > MIN_FACING and not internal:
+                depth = view.depth((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+                walls.append((depth, start, end, normal))
+        edge = edge_color(rgb)
+        for _, start, end, normal in sorted(walls, key=lambda wall: wall[0]):
+            weight = abs(normal[1]) / (abs(normal[0]) + abs(normal[1]))
+            factor = FRONT_SHADE * weight + SIDE_SHADE * (1 - weight)
+            corners = [_xz(start, base), _xz(end, base), _xz(end, top), _xz(start, top)]
+            self.polygon(corners, shade(rgb, factor))
+            self.line(_xz(start, base), _xz(end, base), edge)
+        self.polygon([(x, top, z) for x, z in points], rgb)
+        for start, end, internal in self._edges(cell, content, outline, cells):
+            if not internal:
+                self.line((start[0], top, start[1]), (end[0], top, end[1]), edge)
+        if content.has_stud:
+            self.draw_stud(cell, top, rgb)
+
+    def _world_outline(self, cell: Cell, outline: Sequence[Point2]) -> list[Point2]:
+        """Umriss in Weltkoordinaten (x, z) in LDU."""
+        row, col = cell
+        return [((col + u) * LDU_PER_STUD, (row + v) * LDU_PER_STUD) for u, v in outline]
+
+    def _edges(
+        self,
+        cell: Cell,
+        content: RenderCell,
+        outline: Sequence[Point2],
+        cells: Mapping[Cell, RenderCell],
+    ) -> list[tuple[Point2, Point2, bool]]:
+        """Kanten des Umrisses (Welt) und ob sie innen im Teil liegen (Zellkante zum Nachbarn)."""
+        row, col = cell
+        points = self._world_outline(cell, outline)
+        result = []
+        for index, (u1, v1) in enumerate(outline):
+            u0, v0 = outline[index - 1]
+            neighbor = _border_neighbor((u0, v0), (u1, v1))
+            internal = False
+            if neighbor is not None:
+                other = cells.get((row + neighbor[0], col + neighbor[1]))
+                internal = other is not None and other.part_id == content.part_id
+            result.append((points[index - 1], points[index], internal))
+        return result
+
     def draw_highlight(
         self, cell: Cell, content: RenderCell, cells: Mapping[Cell, RenderCell]
     ) -> None:
         """Orange Umrandung entlang der Teilgrenzen auf der Oberseite einer Zelle."""
+        width = max(2, round(self.scale * HIGHLIGHT_WIDTH_FACTOR))
+        if content.outline is not None:
+            top = content.top_ldu
+            for begin, finish, internal in self._edges(cell, content, content.outline, cells):
+                if not internal:
+                    line = [self.point(*_xz(begin, top)), self.point(*_xz(finish, top))]
+                    self.draw.line(line, fill=HIGHLIGHT_RGB, width=width, joint="curve")
+            return
         row, col = cell
         x0, z0 = col * LDU_PER_STUD, row * LDU_PER_STUD
         x1, z1, top = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD, content.top_ldu
@@ -371,7 +464,6 @@ class _Canvas:
             (row, col - 1): ((x0, top, z0), (x0, top, z1)),
             (row, col + 1): ((x1, top, z0), (x1, top, z1)),
         }
-        width = max(2, round(self.scale * HIGHLIGHT_WIDTH_FACTOR))
         for neighbor, (start, end) in edges.items():
             other = cells.get(neighbor)
             if other is None or other.part_id != content.part_id:
@@ -427,6 +519,45 @@ class _Faces:
     @property
     def right_open(self) -> bool:
         return self.right_base < self.top
+
+
+MIN_FACING = 1e-6  # Wände, die fast genau seitlich stehen, sind nicht zu sehen
+_BORDER_EPSILON = 1e-6
+
+
+def _xz(point: Point2, y: float) -> Point3:
+    """Punkt (x, z) des Umrisses auf Höhe ``y``."""
+    return point[0], y, point[1]
+
+
+def _signed_area(points: Sequence[Point2]) -> float:
+    """Positiv, wenn der Umriss im Uhrzeigersinn läuft (z zeigt nach vorne/unten im Bild)."""
+    return (
+        sum(
+            points[index - 1][0] * point[1] - point[0] * points[index - 1][1]
+            for index, point in enumerate(points)
+        )
+        / 2
+    )
+
+
+def _outward_normal(start: Point2, end: Point2, *, clockwise: bool) -> Point2:
+    """Normale der Kante nach außen (normiert) in der x-z-Ebene."""
+    dx, dz = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dz) or 1.0
+    # Im Uhrzeigersinn (z nach unten) liegt außen links der Laufrichtung: (dz, −dx)
+    nx, nz = (dz, -dx) if clockwise else (-dz, dx)
+    return nx / length, nz / length
+
+
+def _border_neighbor(start: Point2, end: Point2) -> Cell | None:
+    """Liegt die Kante auf einer Zellkante, die Richtung zum Nachbarn (Zeile, Spalte)."""
+    for axis, (d_low, d_high) in ((0, ((0, -1), (0, 1))), (1, ((-1, 0), (1, 0)))):
+        for limit, direction in ((0.0, d_low), (1.0, d_high)):
+            on_border = (abs(value - limit) < _BORDER_EPSILON for value in (start[axis], end[axis]))
+            if all(on_border):
+                return direction
+    return None
 
 
 def _ellipse_box(

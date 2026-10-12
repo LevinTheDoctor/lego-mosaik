@@ -208,6 +208,9 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
         bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
         unterbau: Annotated[str | None, Form(description="art, grundplatte oder ohne")] = None,
         plattengroesse: Annotated[int | None, Form(description="16, 32 oder 48")] = None,
+        format_name: Annotated[
+            str | None, Form(alias="format", description="z. B. quadrat, quer, weltkarte")
+        ] = None,
         platten: Annotated[str | None, Form(description="BxH, z. B. 3x3")] = None,
         breite: Annotated[int | None, Form(description="Eigene Breite in Noppen")] = None,
         hoehe: Annotated[int | None, Form(description="Eigene Höhe in Noppen")] = None,
@@ -224,6 +227,9 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
         farbkategorien: Annotated[str | None, Form(description="z. B. solid,pearl")] = None,
         exotische_farben: Annotated[bool, Form(description="Alle außer Gummi")] = False,
         max_farben: Annotated[int | None, Form(description="0 = unbegrenzt")] = None,
+        stil: Annotated[str | None, Form(description="quadrat, formen, punkte, noppen")] = None,
+        relief: Annotated[str | None, Form(description="ohne, motiv, hell, dunkel")] = None,
+        relief_hoehe: Annotated[int | None, Form(description="1 bis 3 Plates")] = None,
         dithering: Annotated[str | None, Form(description="Dithering-Verfahren")] = None,
         staerke: Annotated[float | None, Form(description="0.0 bis 1.0")] = None,
         farbabstand: Annotated[str | None, Form(description="cie76 oder ciede2000")] = None,
@@ -234,6 +240,7 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
         raw = OverrideInput(
             substrate=unterbau,
             plate_studs=plattengroesse,
+            art_format=format_name,
             plates=platten,
             width_studs=breite,
             height_studs=hoehe,
@@ -250,6 +257,9 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
             color_categories=farbkategorien,
             exotic_colors=exotische_farben,
             max_colors=max_farben,
+            style=stil,
+            relief=relief,
+            relief_levels=relief_hoehe,
             dithering_method=dithering,
             strength=staerke,
             color_distance=farbabstand,
