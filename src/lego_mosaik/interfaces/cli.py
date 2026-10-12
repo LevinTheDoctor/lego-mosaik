@@ -15,18 +15,9 @@ lazy from rich.console import Console
 lazy from rich.logging import RichHandler
 lazy from rich.table import Table
 
-from lego_mosaik.config import (
-    EXOTIC_CATEGORIES,
-    AppConfig,
-    MosaicOverrides,
-    parse_color_categories,
-    parse_fit_mode,
-    parse_names,
-    parse_part_kinds,
-    parse_plates,
-)
+from lego_mosaik.config import AppConfig, parse_overrides
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
-from lego_mosaik.domain.models import ColorCategory, LegoColor
+from lego_mosaik.domain.models import LegoColor
 lazy from lego_mosaik.pipeline import MosaicPipeline, MosaicResult
 lazy from lego_mosaik.sources.protocol import FileStatus, UpdateReport
 
@@ -164,21 +155,20 @@ def _register_create(
         """Erzeugt ein Mosaik aus BILD (Optionen ohne Angabe kommen aus der Konfiguration)."""
 
         def action() -> MosaicResult:
-            plates = parse_plates(platten) if platten else (None, None)
-            overrides = MosaicOverrides(
+            overrides = parse_overrides(
                 baseplate_studs=grundplatte,
-                plates_wide=plates[0],
-                plates_high=plates[1],
-                include_baseplate=mit_grundplatte,
+                plates=platten,
                 frame_width=rahmen,
                 frame_color_id=rahmenfarbe,
-                fit_mode=parse_fit_mode(modus) if modus else None,
-                part_kinds=parse_part_kinds(teile) if teile else None,
-                color_categories=_categories(farbkategorien, exotic=exotische_farben),
+                include_baseplate=mit_grundplatte,
+                fit_mode=modus,
+                part_kinds=teile,
+                color_categories=farbkategorien,
+                exotic_colors=exotische_farben,
                 dithering_method=dithering,
                 strength=staerke,
                 tiling_strategy=zerlegung,
-                outputs=parse_names(ausgaben) if ausgaben else None,
+                outputs=ausgaben,
                 output_dir=ziel,
             )
             pipeline = pipeline_factory(config)
@@ -189,16 +179,6 @@ def _register_create(
 
         result = _run_safely(state, console, action)
         _print_summary(console, result)
-
-
-def _categories(text: str | None, *, exotic: bool) -> tuple[ColorCategory, ...] | None:
-    """Farbkategorien aus ``--farbkategorien`` und ``--exotische-farben`` (vereinigt)."""
-    if text is None and not exotic:
-        return None
-    chosen = list(parse_color_categories(text)) if text else [ColorCategory.SOLID]
-    if exotic:
-        chosen += [category for category in EXOTIC_CATEGORIES if category not in chosen]
-    return tuple(chosen)
 
 
 def _print_summary(console: Console, result: MosaicResult) -> None:
@@ -258,9 +238,8 @@ def _register_catalog_commands(
         """Zeigt die verfügbare Palette als Tabelle mit Farbfeld."""
 
         def action() -> tuple[LegoColor, ...]:
-            overrides = MosaicOverrides(
-                part_kinds=parse_part_kinds(teile) if teile else None,
-                color_categories=_categories(farbkategorien, exotic=exotische_farben),
+            overrides = parse_overrides(
+                part_kinds=teile, color_categories=farbkategorien, exotic_colors=exotische_farben
             )
             return pipeline_factory(config).palette(overrides)
 

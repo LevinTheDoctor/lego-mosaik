@@ -355,6 +355,62 @@ def _check_unique_non_empty(label: str, values: tuple[str, ...]) -> None:
         raise ConfigError(f"{label}: Jeder Wert darf nur einmal vorkommen ({_join(values)}).")
 
 
+def parse_overrides(
+    *,
+    baseplate_studs: int | None = None,
+    plates: str | None = None,
+    frame_width: int | None = None,
+    frame_color_id: int | None = None,
+    include_baseplate: bool | None = None,
+    fit_mode: str | None = None,
+    part_kinds: str | None = None,
+    color_categories: str | None = None,
+    exotic_colors: bool = False,
+    dithering_method: str | None = None,
+    strength: float | None = None,
+    tiling_strategy: str | None = None,
+    outputs: str | None = None,
+    output_dir: Path | None = None,
+) -> MosaicOverrides:
+    """Übersetzt Texteingaben aus CLI oder API in ``MosaicOverrides`` (DRY: nur hier).
+
+    Raises:
+        ConfigError: Bei unbekannten Namen oder falschem Format.
+    """
+    # Bedingter Ausdruck: Ohne Angabe bleibt das Tupel (None, None) → Standardwerte
+    wide, high = parse_plates(plates) if plates else (None, None)
+    return MosaicOverrides(
+        baseplate_studs=baseplate_studs,
+        plates_wide=wide,
+        plates_high=high,
+        include_baseplate=include_baseplate,
+        frame_width=frame_width,
+        frame_color_id=frame_color_id,
+        fit_mode=parse_fit_mode(fit_mode) if fit_mode else None,
+        part_kinds=parse_part_kinds(part_kinds) if part_kinds else None,
+        color_categories=combine_categories(color_categories, exotic=exotic_colors),
+        dithering_method=dithering_method,
+        strength=strength,
+        tiling_strategy=tiling_strategy,
+        outputs=parse_names(outputs) if outputs else None,
+        output_dir=output_dir,
+    )
+
+
+def combine_categories(text: str | None, *, exotic: bool) -> tuple[ColorCategory, ...] | None:
+    """Farbkategorien aus Text und dem Schalter „exotische Farben“ (vereinigt).
+
+    Ohne Text gilt SOLID als Basis; ``exotic`` ergänzt alle exotischen Kategorien.
+    ``None`` heißt: Wert aus der Konfiguration übernehmen.
+    """
+    if text is None and not exotic:
+        return None
+    chosen = list(parse_color_categories(text)) if text else [ColorCategory.SOLID]
+    if exotic:
+        chosen += [category for category in EXOTIC_CATEGORIES if category not in chosen]
+    return tuple(chosen)
+
+
 def config_to_dict(config: AppConfig) -> dict[str, object]:
     """Wandelt die Konfiguration in JSON-fähige Werte um (für ``ergebnis.json``).
 

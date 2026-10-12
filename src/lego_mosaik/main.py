@@ -7,9 +7,11 @@ Konfiguration in deren Konstruktorparameter (Dependency Injection).
 """
 
 import functools
+import logging
 from pathlib import Path
 
 lazy import httpx
+lazy import uvicorn
 
 from lego_mosaik.config import (
     AppConfig,
@@ -35,6 +37,7 @@ from lego_mosaik.registry import (
 )
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
 lazy from lego_mosaik.imaging.preparer import PillowImagePreparer
+lazy from lego_mosaik.interfaces.api import create_app
 lazy from lego_mosaik.interfaces.cli import create_cli
 lazy from lego_mosaik.pipeline import MosaicPipeline, PipelineComponents
 lazy from lego_mosaik.sources.rebrickable_csv import RebrickableCsvSource
@@ -156,6 +159,17 @@ def build_pipeline(config: AppConfig) -> MosaicPipeline:
     )
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+logger = logging.getLogger(__name__)
+
+
+def serve(config: AppConfig, host: str, port: int) -> None:
+    """Startet die FastAPI-App mit uvicorn (Befehl ``lego-mosaik server``)."""
+    if host not in LOOPBACK_HOSTS:
+        logger.warning("Achtung: %s ist von außen erreichbar und hat keine Anmeldung!", host)
+    uvicorn.run(create_app(config, build_pipeline), host=host, port=port)
+
+
 def run() -> None:
     """Entry Point aus pyproject.toml: startet die deutsche CLI."""
-    create_cli(CONFIG, build_pipeline)()
+    create_cli(CONFIG, build_pipeline, serve)()
