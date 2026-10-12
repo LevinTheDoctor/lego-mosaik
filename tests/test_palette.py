@@ -1,10 +1,11 @@
 """Tests für den Aufbau der Palette."""
 
+import dataclasses
 from collections.abc import Sequence
 
 import numpy as np
 
-from lego_mosaik.domain.models import LegoColor, PartCatalog, PartKind
+from lego_mosaik.domain.models import ColorCategory, LegoColor, PartCatalog, PartKind
 from lego_mosaik.domain.palette import build_palette, most_used_colors
 
 
@@ -24,8 +25,28 @@ def test_palette_includes_tile_only_color_when_tiles_allowed(catalog: PartCatalo
 
 
 def test_palette_can_include_transparent_colors(catalog: PartCatalog) -> None:
-    palette = build_palette(catalog, (PartKind.PLATE,), exclude_transparent=False)
+    categories = (ColorCategory.SOLID, ColorCategory.TRANSPARENT)
+    palette = build_palette(catalog, (PartKind.PLATE,), categories=categories)
     assert 36 in _ids(palette)
+
+
+def test_include_ids_bypass_category(catalog: PartCatalog) -> None:
+    palette = build_palette(catalog, (PartKind.PLATE,), include_color_ids=(36,))
+    assert 36 in _ids(palette)
+
+
+def test_exclude_wins_over_include(catalog: PartCatalog) -> None:
+    palette = build_palette(
+        catalog, (PartKind.PLATE,), include_color_ids=(36,), exclude_color_ids=(36,)
+    )
+    assert 36 not in _ids(palette)
+
+
+def test_colors_without_ldraw_code_are_skipped(catalog: PartCatalog) -> None:
+    colors = dict(catalog.colors)
+    colors[4] = dataclasses.replace(colors[4], ldraw_code=None)
+    palette = build_palette(dataclasses.replace(catalog, colors=colors), (PartKind.PLATE,))
+    assert 4 not in _ids(palette)
 
 
 def test_palette_respects_excluded_ids(catalog: PartCatalog) -> None:

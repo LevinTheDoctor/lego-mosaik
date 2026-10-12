@@ -10,7 +10,8 @@ from collections.abc import Iterable, Sequence
 from itertools import groupby
 from pathlib import Path
 
-from lego_mosaik.domain.models import PLATE_HEIGHT_LDU, LongAxis, Mosaic, Placement
+from lego_mosaik.domain.errors import CatalogError
+from lego_mosaik.domain.models import PLATE_HEIGHT_LDU, LegoColor, LongAxis, Mosaic, Placement
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,19 @@ def placement_line(placement: Placement) -> str:
     x = (placement.col + placement.cols_spanned / 2) * LDU_PER_STUD
     z = (placement.row + placement.rows_spanned / 2) * LDU_PER_STUD
     matrix = rotation_matrix(placement)
-    return _type1_line(
-        placement.color.ldraw_code, (x, LAYER_Y, z), matrix, placement.part.ldraw_file
-    )
+    color_code = ldraw_color_code(placement.color)
+    return _type1_line(color_code, (x, LAYER_Y, z), matrix, placement.part.ldraw_file)
+
+
+def ldraw_color_code(color: LegoColor) -> int:
+    """LDraw-Farbcode einer Farbe.
+
+    Raises:
+        CatalogError: Wenn für die Farbe kein sicherer LDraw-Code bekannt ist.
+    """
+    if color.ldraw_code is None:
+        raise CatalogError(f"Für die Farbe {color.name} ist kein LDraw-Farbcode bekannt.")
+    return color.ldraw_code
 
 
 def rotation_matrix(placement: Placement) -> tuple[int, ...]:

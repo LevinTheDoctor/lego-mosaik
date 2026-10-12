@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from lego_mosaik.domain.errors import ConfigError
-from lego_mosaik.domain.models import ColorDistance, FitMode, PartKind, Resampling
+from lego_mosaik.domain.models import ColorCategory, ColorDistance, FitMode, PartKind, Resampling
 
 # Grenzen für die Mosaikgröße in Noppen
 MIN_STUDS = 8
@@ -43,13 +43,39 @@ class MosaicConfig:
     saturation: float = 1.0  # 1.0 = unverändert
 
 
+# "Exotische" Farben: alles außer Solid; Gummi (Rubber) taugt nie für Mosaike
+EXOTIC_CATEGORIES: tuple[ColorCategory, ...] = tuple(
+    category
+    for category in ColorCategory
+    if category not in {ColorCategory.SOLID, ColorCategory.RUBBER}
+)
+
+# Fallback-Regeln für Farbkategorien, wenn Studios Farbtabelle fehlt.
+# Die Reihenfolge zählt: Das erste passende Schlüsselwort gewinnt.
+DEFAULT_CATEGORY_KEYWORDS: tuple[tuple[str, ColorCategory], ...] = (
+    ("Glitter", ColorCategory.GLITTER),
+    ("Speckle", ColorCategory.SPECKLE),
+    ("Satin", ColorCategory.SATIN),
+    ("Opal", ColorCategory.SATIN),
+    ("Glow", ColorCategory.MILKY),
+    ("Milky", ColorCategory.MILKY),
+    ("Chrome", ColorCategory.CHROME),
+    ("Pearl", ColorCategory.PEARL),
+    ("Flat Silver", ColorCategory.PEARL),
+    ("Metallic", ColorCategory.METALLIC),
+    ("Rubber", ColorCategory.RUBBER),
+    ("Trans", ColorCategory.TRANSPARENT),
+)
+
+
 @dataclass(frozen=True, slots=True)
 class PaletteConfig:
     """Welche Teilarten und Farben erlaubt sind."""
 
     part_kinds: tuple[PartKind, ...]
-    exclude_transparent: bool = True
-    exclude_color_ids: tuple[int, ...] = ()
+    color_categories: tuple[ColorCategory, ...] = (ColorCategory.SOLID,)
+    include_color_ids: tuple[int, ...] = ()  # einzelne Farben trotz Kategorie erlauben
+    exclude_color_ids: tuple[int, ...] = ()  # hat Vorrang vor allem anderen
     max_colors: int | None = None  # None = keine Begrenzung
 
 
@@ -104,6 +130,9 @@ class SourceConfig:
     data_dir: Path
     geometry_file: Path = Path("daten/teil_geometrie.csv")
     color_mapping_file: Path = Path("daten/farb_zuordnung.csv")
+    # Optional: Farbtabelle von Bricklink Studio (LDraw-/BrickLink-Codes, Kategorien)
+    studio_color_file: Path | None = Path("/Applications/Studio 2.0/data/StudioColorDefinition.txt")
+    category_keywords: tuple[tuple[str, ColorCategory], ...] = DEFAULT_CATEGORY_KEYWORDS
     base_url: str = "https://cdn.rebrickable.com/media/downloads/"
     files: tuple[str, ...] = ("colors.csv.gz", "parts.csv.gz", "elements.csv.gz")
     max_age_days: int = 7
@@ -151,6 +180,7 @@ class MosaicOverrides:
     height_studs: int | None = None
     fit_mode: FitMode | None = None
     part_kinds: tuple[PartKind, ...] | None = None
+    color_categories: tuple[ColorCategory, ...] | None = None
     dithering_method: str | None = None
     strength: float | None = None
     tiling_strategy: str | None = None
@@ -179,6 +209,9 @@ def apply_overrides(config: AppConfig, overrides: MosaicOverrides) -> AppConfig:
         palette=replace(
             config.palette,
             part_kinds=_or_default(overrides.part_kinds, config.palette.part_kinds),
+            color_categories=_or_default(
+                overrides.color_categories, config.palette.color_categories
+            ),
         ),
         dithering=replace(
             dithering,
@@ -220,6 +253,7 @@ def validate_config(config: AppConfig) -> None:
     _check_positive("Kontrast", config.mosaic.contrast)
     _check_positive("Sättigung", config.mosaic.saturation)
     _check_part_kinds(config.palette.part_kinds)
+    _check_unique_non_empty("Farbkategorien", config.palette.color_categories)
     if config.palette.max_colors is not None:
         _check_range("Maximale Farbanzahl", config.palette.max_colors, 1, MAX_STUDS * MAX_STUDS)
     if config.dithering.bayer_size not in BAYER_SIZES:
@@ -281,6 +315,16 @@ def parse_part_kinds(text: str) -> tuple[PartKind, ...]:
     """
     valid = {kind.value: kind for kind in PartKind}
     return tuple(_lookup(valid, name, "Teilart") for name in parse_names(text))
+
+
+def parse_color_categories(text: str) -> tuple[ColorCategory, ...]:
+    """Wandelt ``"solid,metallic"`` in Farbkategorien um.
+
+    Raises:
+        ConfigError: Bei unbekannten Namen, mit Liste der gültigen Namen.
+    """
+    valid = {category.value: category for category in ColorCategory}
+    return tuple(_lookup(valid, name, "Farbkategorie") for name in parse_names(text))
 
 
 def parse_fit_mode(text: str) -> FitMode:

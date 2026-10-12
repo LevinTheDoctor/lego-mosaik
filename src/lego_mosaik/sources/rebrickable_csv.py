@@ -8,14 +8,27 @@ import csv
 import gzip
 import logging
 import threading
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
 from lego_mosaik.domain.errors import CatalogError
-from lego_mosaik.domain.models import LegoColor, LongAxis, PartCatalog, PartKind, PartType
+from lego_mosaik.domain.models import (
+    ColorCategory,
+    LegoColor,
+    LongAxis,
+    PartCatalog,
+    PartKind,
+    PartType,
+)
 from lego_mosaik.domain.palette import SPECIAL_COLOR_IDS
+from lego_mosaik.sources.studio_colors import (
+    StudioColor,
+    StudioColorTable,
+    category_from_keywords,
+    read_studio_colors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +72,24 @@ class RebrickableCsvSource:
         data_dir: Ordner mit ``colors.csv.gz``, ``parts.csv.gz`` und ``elements.csv.gz``.
         geometry_file: Pfad zu ``teil_geometrie.csv`` (Whitelist der Teile).
         color_mapping_file: Pfad zu ``farb_zuordnung.csv`` (optional, darf fehlen).
+        studio_color_file: Pfad zu Studios ``StudioColorDefinition.txt`` (optional).
+        category_keywords: Fallback-Regeln für Farbkategorien ohne Studio-Tabelle.
     """
 
-    def __init__(self, *, data_dir: Path, geometry_file: Path, color_mapping_file: Path) -> None:
+    def __init__(
+        self,
+        *,
+        data_dir: Path,
+        geometry_file: Path,
+        color_mapping_file: Path,
+        studio_color_file: Path | None,
+        category_keywords: Sequence[tuple[str, ColorCategory]],
+    ) -> None:
         self._data_dir = data_dir
         self._geometry_file = geometry_file
         self._color_mapping_file = color_mapping_file
+        self._studio_color_file = studio_color_file
+        self._category_keywords = tuple(category_keywords)
         self._catalog: PartCatalog | None = None
         # Lock: Im FastAPI-Threadpool könnten zwei Anfragen gleichzeitig zum ersten
         # Mal laden. "with self._lock" lässt immer nur einen Thread hinein.
@@ -90,8 +115,17 @@ class RebrickableCsvSource:
         """Liest alle Dateien und baut daraus den Katalog."""
         data_dir = self._data_dir
         geometry = read_geometry(self._geometry_file)
-        color_mapping = read_color_mapping(self._color_mapping_file)
-        colors = read_colors(data_dir / COLORS_FILE, color_mapping)
+        enrichment = ColorEnrichment(
+            ldraw_overrides=read_color_mapping(self._color_mapping_file),
+            studio=read_studio_colors(self._studio_color_file),
+            category_keywords=self._category_keywords,
+        )
+        if enrichment.studio is None:
+            logger.warning(
+                "Studio-Farbtabelle nicht gefunden: LDraw-Codes werden aus den Rebrickable-IDs "
+                "übernommen (ungeprüft), BrickLink-Farbcodes fehlen."
+            )
+        colors = read_colors(data_dir / COLORS_FILE, enrichment)
         names = read_part_names(data_dir / PARTS_FILE, geometry.keys())
         part_types = {
             part_num: _to_part_type(part_num, names.get(part_num, part_num), row)
@@ -163,23 +197,77 @@ def read_color_mapping(path: Path) -> dict[int, int]:
         return dict(rows)
 
 
-def read_colors(path: Path, ldraw_overrides: dict[int, int]) -> dict[int, LegoColor]:
+@dataclass(frozen=True, slots=True)
+class ColorEnrichment:
+    """Ergänzt Rebrickable-Farben um LDraw-Code, Kategorie, BrickLink-Code und LEGO-Namen.
+
+    Reihenfolge für den LDraw-Code:
+
+    1. Override aus ``farb_zuordnung.csv``
+    2. Namensabgleich mit Studios Farbtabelle (falls vorhanden)
+    3. ohne Studio-Tabelle: Annahme LDraw-Code = Rebrickable-ID
+    4. mit Studio-Tabelle, aber ohne Treffer: ``None`` (Farbe wird nicht verwendet)
+
+    Attributes:
+        ldraw_overrides: Rebrickable-ID → LDraw-Code.
+        studio: Studios Farbtabelle oder ``None``.
+        category_keywords: Fallback-Regeln für die Kategorie ohne Studio-Tabelle.
+    """
+
+    ldraw_overrides: Mapping[int, int]
+    studio: StudioColorTable | None
+    category_keywords: Sequence[tuple[str, ColorCategory]]
+
+    def apply(self, color: LegoColor) -> LegoColor:
+        """Gibt eine ergänzte Kopie der Farbe zurück."""
+        match = self._studio_match(color)
+        category = (match.category if match else None) or category_from_keywords(
+            color.name, color.is_transparent, self.category_keywords
+        )
+        return replace(
+            color,
+            ldraw_code=self._ldraw_code(color, match),
+            category=category,
+            bricklink_code=match.bricklink_code if match else None,
+            lego_name=match.lego_name if match else None,
+        )
+
+    def _studio_match(self, color: LegoColor) -> StudioColor | None:
+        if self.studio is None:
+            return None
+        if color.id in self.ldraw_overrides:
+            return self.studio.find_by_code(self.ldraw_overrides[color.id])
+        return self.studio.find_by_name(color.name)
+
+    def _ldraw_code(self, color: LegoColor, match: StudioColor | None) -> int | None:
+        if color.id in self.ldraw_overrides:
+            return self.ldraw_overrides[color.id]
+        if self.studio is None:
+            return color.id  # Annahme aus dem Prompt, ohne Studio nicht prüfbar
+        return match.ldraw_code if match else None
+
+
+def read_colors(path: Path, enrichment: ColorEnrichment) -> dict[int, LegoColor]:
     """Liest ``colors.csv.gz``. Die Sonderfarben -1 und 9999 werden immer ausgeschlossen."""
 
     def parse(row: dict[str, str]) -> LegoColor:
-        color_id = int(row["id"])
-        return LegoColor(
-            id=color_id,
+        color = LegoColor(
+            id=int(row["id"]),
             name=row["name"].strip(),
             rgb=parse_hex_rgb(row["rgb"]),
             is_transparent=row["is_trans"].strip().lower() in TRUE_VALUES,
-            # Standard: LDraw-Code = Rebrickable-ID, außer die Override-Datei sagt etwas anderes
-            ldraw_code=ldraw_overrides.get(color_id, color_id),
+            ldraw_code=None,
         )
+        return enrichment.apply(color)
 
     with _open_text(path, compressed=True) as handle:
         colors = _parse_rows(handle, path, COLOR_COLUMNS, parse)
-        return {color.id: color for color in colors if color.id not in SPECIAL_COLOR_IDS}
+        result = {color.id: color for color in colors if color.id not in SPECIAL_COLOR_IDS}
+    unmapped = sorted(color.name for color in result.values() if color.ldraw_code is None)
+    if unmapped:
+        logger.info("%d Farben ohne sichere LDraw-Zuordnung werden nicht verwendet.", len(unmapped))
+        logger.debug("Farben ohne LDraw-Zuordnung: %s", ", ".join(unmapped))
+    return result
 
 
 def read_part_names(path: Path, part_nums: Iterable[str]) -> dict[str, str]:

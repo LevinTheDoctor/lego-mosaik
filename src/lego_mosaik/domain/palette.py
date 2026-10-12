@@ -8,7 +8,7 @@ from collections.abc import Iterable, Sequence
 
 lazy import numpy as np
 
-from lego_mosaik.domain.models import IndexGrid, LegoColor, PartCatalog, PartKind
+from lego_mosaik.domain.models import ColorCategory, IndexGrid, LegoColor, PartCatalog, PartKind
 
 # Rebrickable-Sonderfarben, die nie in eine Palette gehören:
 # -1 = "[Unknown]", 9999 = "[No Color/Any Color]"
@@ -19,20 +19,26 @@ def build_palette(
     catalog: PartCatalog,
     part_kinds: Iterable[PartKind],
     *,
-    exclude_transparent: bool = True,
+    categories: Iterable[ColorCategory] = (ColorCategory.SOLID,),
+    include_color_ids: Iterable[int] = (),
     exclude_color_ids: Iterable[int] = (),
 ) -> tuple[LegoColor, ...]:
     """Bestimmt alle Farben, die als Mosaikpixel taugen.
 
-    Eine Farbe kommt nur in die Palette, wenn es in ihr **mindestens ein 1×1-Teil**
-    der erlaubten Teilarten gibt. Sonst ließe sich ein einzelnes Pixel dieser Farbe
-    nicht belegen.
+    Eine Farbe kommt nur in die Palette, wenn
+
+    - sie nicht ausgeschlossen ist (Sonderfarben und ``exclude_color_ids``),
+    - ihre Kategorie erlaubt ist oder ihre ID in ``include_color_ids`` steht,
+    - ein LDraw-Code bekannt ist (sonst wäre sie in Studio falsch) und
+    - es **mindestens ein 1×1-Teil** der erlaubten Teilarten in ihr gibt. Sonst
+      ließe sich ein einzelnes Pixel dieser Farbe nicht belegen.
 
     Args:
         catalog: Der Teilekatalog.
         part_kinds: Erlaubte Teilarten.
-        exclude_transparent: Transparente Farben weglassen.
-        exclude_color_ids: Farb-IDs, die nie verwendet werden sollen.
+        categories: Erlaubte Farbkategorien (Standard: nur Solid).
+        include_color_ids: Farb-IDs, die unabhängig von der Kategorie erlaubt sind.
+        exclude_color_ids: Farb-IDs, die nie verwendet werden sollen (hat Vorrang).
 
     Returns:
         Die Palette, sortiert nach Rebrickable-ID (deterministisch).
@@ -40,12 +46,14 @@ def build_palette(
     # Der * in der Signatur macht alle folgenden Parameter "keyword-only":
     # Sie müssen beim Aufruf mit Namen angegeben werden (lesbarer, weniger Verwechslung)
     kinds = tuple(part_kinds)
+    allowed_categories, included = frozenset(categories), frozenset(include_color_ids)
     excluded = SPECIAL_COLOR_IDS | frozenset(exclude_color_ids)  # | = Vereinigung zweier Mengen
     palette = [
         color
         for color in catalog.colors.values()
         if color.id not in excluded
-        and not (exclude_transparent and color.is_transparent)
+        and (color.category in allowed_categories or color.id in included)
+        and color.ldraw_code is not None
         and _has_single_stud_part(catalog, color.id, kinds)
     ]
     return tuple(sorted(palette, key=lambda color: color.id))

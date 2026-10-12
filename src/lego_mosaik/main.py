@@ -20,6 +20,8 @@ def build_catalog_source(source: SourceConfig) -> RebrickableCsvSource:
         data_dir=source.data_dir,
         geometry_file=source.geometry_file,
         color_mapping_file=source.color_mapping_file,
+        studio_color_file=source.studio_color_file,
+        category_keywords=source.category_keywords,
     )
 
 

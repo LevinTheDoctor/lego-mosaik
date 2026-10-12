@@ -44,6 +44,21 @@ class LongAxis(StrEnum):
     Z = "z"
 
 
+class ColorCategory(StrEnum):
+    """Oberflächen-Kategorie einer Farbe (wie in Bricklink Studio gruppiert)."""
+
+    SOLID = "solid"  # normale, deckende Farben
+    TRANSPARENT = "transparent"
+    METALLIC = "metallic"
+    PEARL = "pearl"
+    CHROME = "chrome"
+    GLITTER = "glitter"
+    SPECKLE = "speckle"
+    SATIN = "satin"
+    MILKY = "milky"  # z. B. Glow in Dark
+    RUBBER = "rubber"  # Gummi, für Mosaike ungeeignet
+
+
 class FitMode(StrEnum):
     """Wie das Bild auf das Seitenverhältnis des Mosaiks gebracht wird."""
 
@@ -76,14 +91,20 @@ class LegoColor:
         name: Englischer Farbname aus Rebrickable, z. B. "Bright Green".
         rgb: Farbwert als (R, G, B), je 0–255.
         is_transparent: True bei transparenten Farben.
-        ldraw_code: Farbcode für LDraw-Dateien.
+        ldraw_code: Farbcode für LDraw-Dateien; ``None``, wenn keine sichere Zuordnung bekannt ist.
+        category: Oberflächen-Kategorie (solid, metallic, pearl, …).
+        bricklink_code: BrickLink-Farbcode, falls bekannt (für die Wanted List).
+        lego_name: Offizieller LEGO-Farbname, falls bekannt (z. B. "Bright Red").
     """
 
     id: int
     name: str
     rgb: RgbTuple
     is_transparent: bool
-    ldraw_code: int
+    ldraw_code: int | None
+    category: ColorCategory = ColorCategory.SOLID
+    bricklink_code: int | None = None
+    lego_name: str | None = None
 
     @property
     def hex(self) -> str:

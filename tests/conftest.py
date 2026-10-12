@@ -32,7 +32,7 @@ from lego_mosaik.config import (
     SourceConfig,
     TilingConfig,
 )
-from lego_mosaik.domain.models import LegoColor, PartCatalog, PartKind, PartType
+from lego_mosaik.domain.models import ColorCategory, LegoColor, PartCatalog, PartKind, PartType
 
 # (id, name, rgb_hex, is_trans) – wie in Rebrickables colors.csv
 COLOR_ROWS: tuple[tuple[int, str, str, bool], ...] = (
@@ -84,7 +84,14 @@ def hex_to_rgb(hex_value: str) -> tuple[int, int, int]:
 def make_catalog() -> PartCatalog:
     """Baut den Mini-Katalog direkt aus den Tabellen oben."""
     colors = {
-        color_id: LegoColor(color_id, name, hex_to_rgb(rgb), is_trans, ldraw_code=color_id)
+        color_id: LegoColor(
+            color_id,
+            name,
+            hex_to_rgb(rgb),
+            is_trans,
+            ldraw_code=color_id,
+            category=ColorCategory.TRANSPARENT if is_trans else ColorCategory.SOLID,
+        )
         for color_id, name, rgb, is_trans in COLOR_ROWS
     }
     part_types = {
@@ -164,6 +171,7 @@ def source_config(tmp_path: Path) -> SourceConfig:
         data_dir=data_dir,
         geometry_file=tmp_path / "teil_geometrie.csv",
         color_mapping_file=tmp_path / "farb_zuordnung.csv",
+        studio_color_file=None,  # Tests dürfen nicht von einer lokalen Studio-Installation abhängen
         auto_update=False,
     )
 
@@ -183,7 +191,9 @@ def app_config(tmp_path: Path) -> AppConfig:
         dithering=DitheringConfig(method="floyd_steinberg"),
         tiling=TilingConfig(strategy="greedy"),
         outputs=("preview_png", "ldraw", "parts_list_csv", "result_json"),
-        source=SourceConfig(data_dir=tmp_path / "rebrickable", auto_update=False),
+        source=SourceConfig(
+            data_dir=tmp_path / "rebrickable", studio_color_file=None, auto_update=False
+        ),
         output_dir=tmp_path / "ausgabe",
     )
 
