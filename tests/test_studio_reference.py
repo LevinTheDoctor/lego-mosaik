@@ -5,6 +5,7 @@ Annahmen, die wir nicht erfinden wollen: BrickLink-Teilenummern der Whitelist.
 """
 
 import csv
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -36,3 +37,13 @@ def test_bricklink_ids_match_studio() -> None:
         if row["bricklink_id"] not in studio.get(row["ldraw_file"], set())
     ]
     assert mismatches == []
+
+
+def test_ldraw_long_axes_match_library() -> None:
+    # Das Skript liegt außerhalb des Pakets; importlib lädt es direkt aus der Datei
+    script = Path(__file__).parent.parent / "scripts" / "ldraw_achsen_pruefen.py"
+    spec = importlib.util.spec_from_file_location("ldraw_achsen_pruefen", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.check(STUDIO_DIR / "ldraw", GEOMETRY_FILE) == []

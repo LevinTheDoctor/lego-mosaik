@@ -42,6 +42,17 @@ from lego_mosaik.main import build_catalog_source, build_components, build_updat
 from lego_mosaik.pipeline import MosaicPipeline
 from lego_mosaik.registry import DITHERERS
 
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Eigene Option: Golden Files neu erzeugen statt vergleichen."""
+    parser.addoption(
+        "--golden-aktualisieren",
+        action="store_true",
+        default=False,
+        help="Golden Files in tests/golden/ neu schreiben.",
+    )
+
+
 # (id, name, rgb_hex, is_trans) – wie in Rebrickables colors.csv
 COLOR_ROWS: tuple[tuple[int, str, str, bool], ...] = (
     (0, "Black", "05131D", False),
