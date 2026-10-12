@@ -28,6 +28,7 @@ lazy from lego_mosaik.dithering.ordered import OrderedDitherer
 lazy from lego_mosaik.dithering.protocol import Ditherer
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
 lazy from lego_mosaik.outputs.ldraw import LdrawWriter
+lazy from lego_mosaik.outputs.official_parts_lists import OfficialPartsListsWriter
 lazy from lego_mosaik.outputs.parts_list_csv import PartsListCsvWriter
 lazy from lego_mosaik.outputs.preview_png import PreviewPngWriter
 lazy from lego_mosaik.outputs.protocol import OutputWriter
@@ -82,6 +83,7 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
     ),
     "ldraw": lambda config: LdrawWriter(rows_per_step=config.ldraw.rows_per_step),
     "parts_list_csv": lambda config: PartsListCsvWriter(),
+    "official_parts_lists": lambda config: OfficialPartsListsWriter(),
     "result_json": lambda config: ResultJsonWriter(),
 }
 

@@ -57,6 +57,9 @@ PART_ROWS: tuple[tuple[str, str, PartKind, int, int, int], ...] = (
     ("3867", "Baseplate 16 x 16", PartKind.BASEPLATE, 16, 16, 4),
 )
 
+# Abweichende BrickLink-Teilenummern (wie in daten/teil_geometrie.csv)
+BRICKLINK_IDS = {"3070b": "3070"}
+
 # (part_num, color_id) – welche Kombinationen es gibt
 AVAILABLE: tuple[tuple[str, int], ...] = (
     ("3024", 0),
@@ -98,7 +101,16 @@ def make_catalog() -> PartCatalog:
         for color_id, name, rgb, is_trans in COLOR_ROWS
     }
     part_types = {
-        part_num: PartType(part_num, name, kind, width, length, f"{part_num}.dat", height)
+        part_num: PartType(
+            part_num,
+            name,
+            kind,
+            width,
+            length,
+            f"{part_num}.dat",
+            height,
+            bricklink_id=BRICKLINK_IDS.get(part_num),
+        )
         for part_num, name, kind, width, length, height in PART_ROWS
     }
     element_ids = {combo: _element_id(index) for index, combo in enumerate(AVAILABLE)}
@@ -157,9 +169,18 @@ def write_rebrickable_dumps(data_dir: Path) -> None:
 
 def write_geometry(path: Path) -> None:
     """Schreibt eine Mini-``teil_geometrie.csv`` passend zu ``PART_ROWS``."""
-    header = ("part_num", "kind", "width_studs", "length_studs", "ldraw_file", "height_ldu")
+    header = (
+        "part_num",
+        "kind",
+        "width_studs",
+        "length_studs",
+        "ldraw_file",
+        "height_ldu",
+        "bricklink_id",
+    )
     rows = [
-        (num, kind.value, w, length, f"{num}.dat", h) for num, _, kind, w, length, h in PART_ROWS
+        (num, kind.value, w, length, f"{num}.dat", h, BRICKLINK_IDS.get(num, ""))
+        for num, _, kind, w, length, h in PART_ROWS
     ]
     write_csv(path, header, rows, compressed=False)
 
