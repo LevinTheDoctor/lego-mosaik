@@ -1,8 +1,8 @@
 """LDraw-Datei (``.ldr``) mit Bauschritten für Bricklink Studio.
 
 LDraw-Koordinaten: 1 Noppe = 20 LDU, die y-Achse zeigt nach *unten* (−y = oben).
-Das ganze Mosaik liegt in einer Ebene (y = 0), Bildzeilen laufen entlang +z,
-Bildspalten entlang +x.
+Bildzeilen laufen entlang +z, Bildspalten entlang +x. Die Oberkante des Unterbaus
+liegt bei y = 8, das Bild (Plates und Tiles) also genau eine Plate-Höhe darüber.
 """
 
 import logging
@@ -10,20 +10,32 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from lego_mosaik.domain.errors import CatalogError
-from lego_mosaik.domain.models import PLATE_HEIGHT_LDU, LegoColor, LongAxis, Mosaic, Placement
-from lego_mosaik.domain.sections import build_steps
+from lego_mosaik.domain.models import (
+    PLATE_HEIGHT_LDU,
+    LegoColor,
+    LongAxis,
+    Mosaic,
+    PartKind,
+    Placement,
+)
+from lego_mosaik.domain.sections import BuildStep, StepKind, assembly_steps
 
 logger = logging.getLogger(__name__)
 
 FILE_NAME = "mosaik.ldr"
 LDU_PER_STUD = 20
-LAYER_Y = 0  # alle Teile in einer Lage
 # Rotationsmatrizen (zeilenweise a b c d e f g h i)
 IDENTITY = (1, 0, 0, 0, 1, 0, 0, 0, 1)
 ROTATE_Y_90 = (0, 0, 1, 0, 1, 0, -1, 0, 0)  # 90° um die y-Achse: x → z
-# Grundplatten liegen unter der Mosaiklage: Ihre Oberkante (Ursprung der LDraw-Datei)
-# trifft die Unterkante der Plates, also eine Plate-Höhe tiefer (+y = nach unten)
-BASEPLATE_Y = PLATE_HEIGHT_LDU
+# Oberkante des Unterbaus. Plates, Tiles und Unterbau-Platten haben ihren Ursprung
+# an der Oberkante; eine Plate direkt auf dem Unterbau hat damit y = 0 (+y = nach unten)
+SUBSTRATE_TOP_Y = PLATE_HEIGHT_LDU
+# Kommentar vor jedem Schritt (Studio ignoriert ihn, beim Lesen der Datei hilft er)
+_STEP_COMMENTS = {
+    StepKind.CONNECTORS: "Verbinder (Technic-Pins)",
+    StepKind.FRAME: "Rahmen",
+}
+_SUBSTRATE_COMMENTS = {PartKind.BASEPLATE: "Grundplatten", PartKind.PANEL: "LEGO-Art-Paneele"}
 
 
 class LdrawWriter:
@@ -32,17 +44,21 @@ class LdrawWriter:
     Args:
         rows_per_step: Nach so vielen Zeilen eines Abschnitts beginnt ein neuer Bauschritt.
         section_studs: Kantenlänge der Bauabschnitte (wie in der Bauanleitung).
+        connector_depth_ldu: Tiefe der Pin-Löcher unter der Oberkante der Art-Paneele.
     """
 
     name = "ldraw"
 
-    def __init__(self, *, rows_per_step: int, section_studs: int) -> None:
+    def __init__(
+        self, *, rows_per_step: int, section_studs: int, connector_depth_ldu: int = 16
+    ) -> None:
         self._rows_per_step = rows_per_step
         self._section_studs = section_studs
+        self._connector_depth = connector_depth_ldu
 
     def write(self, mosaic: Mosaic, target_dir: Path) -> Path:
         """Erzeugt die Zeilen und schreibt sie mit Windows-freundlichen Zeilenenden."""
-        lines = ldraw_lines(mosaic, self._rows_per_step, self._section_studs)
+        lines = ldraw_lines(mosaic, self._rows_per_step, self._section_studs, self._connector_depth)
         path = target_dir / FILE_NAME
         # LDraw-Dateien sind ASCII/UTF-8; CRLF ("\r\n") ist der übliche Zeilenumbruch
         path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
@@ -50,32 +66,59 @@ class LdrawWriter:
         return path
 
 
-def ldraw_lines(mosaic: Mosaic, rows_per_step: int, section_studs: int) -> list[str]:
-    """Alle Zeilen der LDraw-Datei: Kopf, Grundplatten (erster Schritt), Teile in Bauschritten.
+def ldraw_lines(
+    mosaic: Mosaic, rows_per_step: int, section_studs: int, connector_depth_ldu: int = 16
+) -> list[str]:
+    """Alle Zeilen: Kopf, dann pro Bauschritt die Teile und ein ``0 STEP``.
 
-    Vor jedem Abschnitt steht ein Kommentar (``0 // Abschnitt 3``); LDraw-Programme
-    wie Studio ignorieren ihn, beim Lesen der Datei hilft er.
+    Die Schritte sind dieselben wie in der Bauanleitung (``assembly_steps``):
+    Unterbau, Verbinder, Rahmen-Unterbau, Rahmen, dann das Bild abschnittsweise.
     """
     lines = header_lines(mosaic.title)
-    if mosaic.baseplates:
-        lines.append("0 // Grundplatten")
-        lines += [placement_line(plate, y=BASEPLATE_Y) for plate in mosaic.baseplates]
-        lines.append("0 STEP")
-    steps = build_steps(
-        mosaic.placements,
-        width=mosaic.width,
-        height=mosaic.height,
-        section_studs=section_studs,
-        rows_per_step=rows_per_step,
-    )
-    previous_section = 0
+    steps = assembly_steps(mosaic, section_studs=section_studs, rows_per_step=rows_per_step)
+    previous_comment = ""
     for step in steps:
-        if step.section.number != previous_section:
-            lines.append(f"0 // Abschnitt {step.section.number}")
-            previous_section = step.section.number
-        lines += [placement_line(placement) for placement in step.placements]
+        comment = step_comment(step)
+        if comment != previous_comment:  # ein Kommentar pro Abschnitt, nicht pro Schritt
+            lines.append(f"0 // {comment}")
+            previous_comment = comment
+        lines += [
+            placement_line(placement, y=_y(step.kind, placement, connector_depth_ldu))
+            for placement in step.placements
+        ]
         lines.append("0 STEP")
     return lines
+
+
+def step_comment(step: BuildStep) -> str:
+    """Kurzer deutscher Name des Schritts, z. B. „Abschnitt 3“."""
+    match step.kind:
+        case StepKind.SECTION if step.section is not None:
+            return f"Abschnitt {step.section.number}"
+        case StepKind.SUBSTRATE:
+            return _SUBSTRATE_COMMENTS.get(step.placements[0].part.kind, "Unterbau")
+        case StepKind.FRAME_SUPPORT:
+            return f"Rahmen-Unterbau, Lage {step.level + 1}"
+        case _:
+            return _STEP_COMMENTS.get(step.kind, step.kind.value)
+
+
+def _y(kind: StepKind, placement: Placement, connector_depth_ldu: int) -> float:
+    """Höhe des Teilursprungs (y) je nach Art des Schritts."""
+    if kind is StepKind.SUBSTRATE:
+        return SUBSTRATE_TOP_Y  # Ursprung = Oberkante der Platte
+    if kind is StepKind.CONNECTORS:
+        return SUBSTRATE_TOP_Y + connector_depth_ldu  # Pin-Mitte steckt seitlich im Paneel
+    return part_y(placement)
+
+
+def part_y(placement: Placement) -> float:
+    """y der Oberkante eines gestapelten Teils: Unterbau-Oberkante − Unterkante − Höhe.
+
+    Beispiele: Plate auf dem Unterbau 8 − 0 − 8 = 0; Tile auf einer Stütz-Plate
+    8 − 8 − 8 = −8 (eine Plate höher); Brick 8 − 0 − 24 = −16.
+    """
+    return SUBSTRATE_TOP_Y - placement.bottom_ldu - placement.part.height_ldu
 
 
 def header_lines(title: str) -> list[str]:
@@ -88,7 +131,7 @@ def header_lines(title: str) -> list[str]:
     ]
 
 
-def placement_line(placement: Placement, *, y: float = LAYER_Y) -> str:
+def placement_line(placement: Placement, *, y: float) -> str:
     """Zeile Typ 1: ``1 <farbe> <x> <y> <z> <a b c d e f g h i> <datei>``."""
     # Mittelpunkt des Teils: linke Kante + halbe Ausdehnung, in LDU umgerechnet
     x = (placement.col + placement.cols_spanned / 2) * LDU_PER_STUD

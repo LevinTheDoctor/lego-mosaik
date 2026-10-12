@@ -15,7 +15,8 @@ class TilingStrategy(Protocol):
         """Zerlegt das Farbraster vollständig und überlappungsfrei in Teile.
 
         Args:
-            color_grid: H×W-Raster mit Indizes in ``palette``.
+            color_grid: H×W-Raster mit Indizes in ``palette``. Zellen mit ``EMPTY_CELL``
+                (−1) bleiben frei, z. B. die Innenfläche, wenn nur der Rahmen zerlegt wird.
             palette: Die Farben, auf die sich das Raster bezieht.
             catalog: Katalog mit verfügbaren (Teil, Farbe)-Kombinationen.
         """

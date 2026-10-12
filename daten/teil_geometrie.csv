@@ -29,3 +29,5 @@ part_num,kind,width_studs,length_studs,ldraw_file,height_ldu,ldraw_long_axis,bri
 3867,baseplate,16,16,3867.dat,4,x,3867
 3811,baseplate,32,32,3811.dat,4,x,3811
 4186,baseplate,48,48,4186.dat,4,x,4186
+65803,panel,16,16,65803.dat,32,x,65803
+2780,connector,1,2,2780.dat,12,z,2780

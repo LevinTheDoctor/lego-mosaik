@@ -48,7 +48,7 @@ def test_create_and_download(client: TestClient, image_file: Path) -> None:
     dateien = body["dateien"]
     assert isinstance(dateien, dict) and "mosaik.ldr" in dateien
     result = client.get(f"/mosaike/{mosaic_id}").json()
-    assert result["konfiguration"]["layout"]["frame_width"] == 2
+    assert result["konfiguration"]["frame"]["width"] == 2
     download = client.get(f"/mosaike/{mosaic_id}/dateien/mosaik.ldr")
     assert download.status_code == 200
     assert download.text.startswith("0 bild")

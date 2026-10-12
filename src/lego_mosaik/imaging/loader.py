@@ -4,15 +4,31 @@ import io
 import logging
 from pathlib import Path
 
-lazy from PIL import Image, ImageOps, UnidentifiedImageError
+lazy from PIL import ExifTags, Image, ImageOps, UnidentifiedImageError
 
 from lego_mosaik.domain.errors import InvalidImageError
 from lego_mosaik.domain.models import RgbTuple
+from lego_mosaik.imaging.protocol import ImageInfo
 
 logger = logging.getLogger(__name__)
 
 # Bildmodi mit Alphakanal bzw. Palettenbilder, die Transparenz enthalten können
 ALPHA_MODES = frozenset({"RGBA", "LA", "PA", "RGBa", "La"})
+# EXIF-Ausrichtungen 5–8 drehen das Bild um 90° bzw. 270°: Breite und Höhe tauschen
+ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
+
+
+def inspect_image(source: Path | bytes) -> ImageInfo:
+    """Liest Größe und Format eines Bilds; berücksichtigt die EXIF-Drehung.
+
+    Raises:
+        InvalidImageError: Wenn die Datei fehlt oder kein lesbares Bild ist.
+    """
+    image = _open(source)
+    width, height = image.size
+    if image.getexif().get(ExifTags.Base.Orientation) in ROTATED_ORIENTATIONS:
+        width, height = height, width  # Tupel-Zuweisung tauscht ohne Hilfsvariable
+    return ImageInfo(width, height, image.format)
 
 
 def load_image(source: Path | bytes, background: RgbTuple) -> Image.Image:

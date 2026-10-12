@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
-from lego_mosaik.config import AppConfig, parse_overrides
+from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
 from lego_mosaik.domain.models import LegoColor
 from lego_mosaik.pipeline import MosaicPipeline, safe_name
@@ -164,10 +164,10 @@ def _register_catalog_routes(app: FastAPI, pipeline: MosaicPipeline) -> None:
         farbkategorien: Annotated[str | None, Query(description="z. B. solid,pearl")] = None,
         exotisch: Annotated[bool, Query(description="Alle Kategorien außer Gummi")] = False,
     ) -> list[ColorModel]:
-        overrides = parse_overrides(
+        raw = OverrideInput(
             part_kinds=teile, color_categories=farbkategorien, exotic_colors=exotisch
         )
-        return [_color_model(color) for color in pipeline.palette(overrides)]
+        return [_color_model(color) for color in pipeline.palette(parse_overrides(raw))]
 
     @app.get("/verfahren", summary="Registrierte Verfahren und Ausgaben")
     def methods() -> dict[str, list[str]]:
@@ -206,36 +206,57 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
     def create_mosaic(
         request: Request,
         bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
-        grundplatte: Annotated[int | None, Form(description="16, 32 oder 48")] = None,
-        platten: Annotated[str | None, Form(description="BxH, z. B. 2x2")] = None,
+        unterbau: Annotated[str | None, Form(description="art, grundplatte oder ohne")] = None,
+        plattengroesse: Annotated[int | None, Form(description="16, 32 oder 48")] = None,
+        platten: Annotated[str | None, Form(description="BxH, z. B. 3x3")] = None,
+        breite: Annotated[int | None, Form(description="Eigene Breite in Noppen")] = None,
+        hoehe: Annotated[int | None, Form(description="Eigene Höhe in Noppen")] = None,
+        unterbaufarbe: Annotated[int | None, Form(description="Rebrickable-ID")] = None,
         rahmen: Annotated[int | None, Form(description="Rahmenbreite in Noppen")] = None,
         rahmenfarbe: Annotated[int | None, Form(description="Rebrickable-ID")] = None,
-        mit_grundplatte: Annotated[bool | None, Form(description="Grundplatten aufnehmen")] = None,
+        eckenfarbe: Annotated[int | None, Form(description="Rebrickable-ID der Ecken")] = None,
+        rahmen_teile: Annotated[str | None, Form(description="z. B. tile")] = None,
+        rahmen_erhoehung: Annotated[int | None, Form(description="Plates unter dem Rahmen")] = None,
         modus: Annotated[str | None, Form(description="zuschneiden oder einpassen")] = None,
+        kontrast: Annotated[float | None, Form(description="1.0 = unverändert")] = None,
+        saettigung: Annotated[float | None, Form(description="1.0 = unverändert")] = None,
         teile: Annotated[str | None, Form(description="z. B. plate,tile")] = None,
         farbkategorien: Annotated[str | None, Form(description="z. B. solid,pearl")] = None,
         exotische_farben: Annotated[bool, Form(description="Alle außer Gummi")] = False,
+        max_farben: Annotated[int | None, Form(description="0 = unbegrenzt")] = None,
         dithering: Annotated[str | None, Form(description="Dithering-Verfahren")] = None,
         staerke: Annotated[float | None, Form(description="0.0 bis 1.0")] = None,
+        farbabstand: Annotated[str | None, Form(description="cie76 oder ciede2000")] = None,
         zerlegung: Annotated[str | None, Form(description="Zerlegungsverfahren")] = None,
         ausgaben: Annotated[str | None, Form(description="z. B. preview_png,ldraw")] = None,
     ) -> MosaicCreatedModel:
         data = _read_limited(bild, max_bytes)
-        overrides = parse_overrides(
-            baseplate_studs=grundplatte,
+        raw = OverrideInput(
+            substrate=unterbau,
+            plate_studs=plattengroesse,
             plates=platten,
+            width_studs=breite,
+            height_studs=hoehe,
+            substrate_color_id=unterbaufarbe,
             frame_width=rahmen,
             frame_color_id=rahmenfarbe,
-            include_baseplate=mit_grundplatte,
+            frame_corner_color_id=eckenfarbe,
+            frame_part_kinds=rahmen_teile,
+            frame_raise_plates=rahmen_erhoehung,
             fit_mode=modus,
+            contrast=kontrast,
+            saturation=saettigung,
             part_kinds=teile,
             color_categories=farbkategorien,
             exotic_colors=exotische_farben,
+            max_colors=max_farben,
             dithering_method=dithering,
             strength=staerke,
+            color_distance=farbabstand,
             tiling_strategy=zerlegung,
             outputs=ausgaben,
         )
+        overrides = parse_overrides(raw)
         title = safe_name(Path(bild.filename or "mosaik").stem)
         result = pipeline.run(data, overrides, title=title)
         files = _result_files(result.target_dir)

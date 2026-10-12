@@ -8,6 +8,7 @@ Konfiguration in deren Konstruktorparameter (Dependency Injection).
 
 import functools
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 lazy import httpx
@@ -16,6 +17,7 @@ lazy import uvicorn
 from lego_mosaik.config import (
     AppConfig,
     DitheringConfig,
+    FrameConfig,
     InstructionsConfig,
     LayoutConfig,
     LdrawConfig,
@@ -25,9 +27,17 @@ from lego_mosaik.config import (
     ServerConfig,
     SourceConfig,
     TilingConfig,
+    frame_part_kinds,
     validate_config,
 )
-from lego_mosaik.domain.models import ColorCategory, ColorDistance, FitMode, PartKind, Resampling
+from lego_mosaik.domain.models import (
+    ColorCategory,
+    ColorDistance,
+    FitMode,
+    PartKind,
+    Resampling,
+    Substrate,
+)
 from lego_mosaik.registry import (
     DITHERERS,
     OUTPUT_WRITERS,
@@ -42,16 +52,25 @@ lazy from lego_mosaik.interfaces.cli import create_cli
 lazy from lego_mosaik.pipeline import MosaicPipeline, PipelineComponents
 lazy from lego_mosaik.sources.rebrickable_csv import RebrickableCsvSource
 lazy from lego_mosaik.sources.updater import CatalogUpdater
+lazy from lego_mosaik.tiling.protocol import TilingStrategy
 
 CONFIG = AppConfig(
     layout=LayoutConfig(
-        baseplate_studs=48,  # Grundplattengröße: 16, 32 oder 48 Noppen
-        plates_wide=1,  # Grundplatten nebeneinander
-        plates_high=1,  # Grundplatten untereinander → 48 × 48 Noppen
-        include_baseplate=True,  # Grundplatten in LDraw-Datei und Teilelisten
-        baseplate_color_id=71,  # Light Bluish Gray (Rebrickable-ID)
-        frame_width=1,  # Rahmen in Noppen (0 = ohne Rahmen)
-        frame_color_id=0,  # Black
+        substrate=Substrate.ART_PANEL,  # ART_PANEL (verbunden), BASEPLATE oder NONE
+        plate_studs=16,  # Art-Paneel 16; Grundplatte 16, 32 oder 48 Noppen
+        plates_wide=3,  # Platten nebeneinander
+        plates_high=3,  # Platten untereinander → 48 × 48 Noppen
+        width_studs=None,  # freie Größe in Noppen statt Platten (None = aus den Platten)
+        height_studs=None,  # fehlt eine Seite, kommt sie aus dem Seitenverhältnis
+        substrate_color_id=None,  # None = Standard (Art: Black, Grundplatte: Light Bluish Gray)
+        pins_per_seam=2,  # Technic-Pins pro Naht zwischen zwei Art-Paneelen
+    ),
+    frame=FrameConfig(
+        width=1,  # Rahmen in Noppen (0 = ohne Rahmen)
+        color_id=0,  # Black
+        corner_color_id=None,  # eigene Farbe für die Ecken, z. B. 15 (White)
+        part_kinds=(PartKind.TILE,),  # glatter Rahmen wie bei LEGO Art; None = wie das Bild
+        raise_plates=1,  # Rahmen eine Plate höher als das Bild (0 = bündig)
     ),
     mosaic=MosaicConfig(
         fit_mode=FitMode.CROP,  # CROP = mittig zuschneiden, PAD = einpassen mit Rand
@@ -126,6 +145,16 @@ def build_updater(
     )
 
 
+def build_tiler(config: AppConfig, part_kinds: tuple[PartKind, ...]) -> TilingStrategy:
+    """Zerlegung laut Konfiguration, aber mit eigenen Teilarten (z. B. für den Rahmen).
+
+    Die Registry-Fabriken lesen die Teilarten aus der Palette; eine Kopie der
+    Konfiguration mit anderen Teilarten liefert deshalb dieselbe Strategie für andere Teile.
+    """
+    adjusted = replace(config, palette=replace(config.palette, part_kinds=part_kinds))
+    return resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(adjusted)
+
+
 def build_components(config: AppConfig) -> PipelineComponents:
     """Steckt die konkreten Bausteine eines Laufs anhand der Konfiguration zusammen."""
     return PipelineComponents(
@@ -138,6 +167,8 @@ def build_components(config: AppConfig) -> PipelineComponents:
         color_space=LabColorSpace(config.dithering.color_distance),
         ditherer=resolve(DITHERERS, config.dithering.method, "Dithering-Verfahren")(config),
         tiler=resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(config),
+        frame_tiler=build_tiler(config, frame_part_kinds(config)),
+        support_tiler=build_tiler(config, (PartKind.PLATE,)),  # Stützlagen brauchen Noppen
         writers=tuple(
             resolve(OUTPUT_WRITERS, name, "Ausgabeformat")(config) for name in config.outputs
         ),

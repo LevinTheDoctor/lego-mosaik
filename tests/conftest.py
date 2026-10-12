@@ -13,6 +13,8 @@ Yellow     14    Tile 1×1                               nur mit Teilart TILE
 White      15    Plate 1×1, 1×2, 2×4; Tile 1×1; Brick   in Palette
 Trans-Red  36    Plate 1×1                              raus: transparent
 =========  ====  =====================================  =============================
+
+Unterbau: Grundplatte 16 × 16 in White, LEGO-Art-Paneel 16 × 16 und Technic-Pin in Black.
 """
 
 import csv
@@ -73,6 +75,8 @@ PART_ROWS: tuple[tuple[str, str, PartKind, int, int, int], ...] = (
     ("3070b", "Tile 1 x 1 with Groove", PartKind.TILE, 1, 1, 8),
     ("3005", "Brick 1 x 1", PartKind.BRICK, 1, 1, 24),
     ("3867", "Baseplate 16 x 16", PartKind.BASEPLATE, 16, 16, 4),
+    ("65803", "Brick Special 16 x 16 x 1 1/3 with Pin Holes", PartKind.PANEL, 16, 16, 32),
+    ("2780", "Technic Pin with Friction Ridges", PartKind.CONNECTOR, 1, 2, 12),
 )
 
 # Abweichende BrickLink-Teilenummern (wie in daten/teil_geometrie.csv)
@@ -97,6 +101,8 @@ AVAILABLE: tuple[tuple[str, int], ...] = (
     ("3005", 15),
     ("3024", 36),
     ("3867", 15),
+    ("65803", 0),
+    ("2780", 0),
 )
 
 
@@ -228,7 +234,7 @@ def catalog() -> PartCatalog:
 def app_config(tmp_path: Path) -> AppConfig:
     """Kleine, schnelle Konfiguration mit Ausgabeordner im Temp-Verzeichnis."""
     return AppConfig(
-        layout=LayoutConfig(baseplate_studs=16, frame_width=1),
+        layout=LayoutConfig(plate_studs=16),  # Grundplatte 16 × 16, Rahmen 1 Noppe
         mosaic=MosaicConfig(),
         palette=PaletteConfig(part_kinds=(PartKind.PLATE, PartKind.TILE)),
         dithering=DitheringConfig(method="floyd_steinberg"),
@@ -289,7 +295,7 @@ def pipeline_config(app_config: AppConfig, source_config: SourceConfig) -> AppCo
     return dataclasses.replace(
         app_config,
         source=source_config,
-        layout=dataclasses.replace(app_config.layout, baseplate_color_id=15),
+        layout=dataclasses.replace(app_config.layout, substrate_color_id=15),
         outputs=("preview_png", "ldraw", "parts_list_csv", "official_parts_lists", "result_json"),
     )
 

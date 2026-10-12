@@ -3,9 +3,12 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-lazy from PIL import Image, ImageDraw
+lazy from PIL import Image, ImageDraw, ImageFont
 
 from lego_mosaik.domain.models import Placement, RgbTuple
+
+type Font = ImageFont.FreeTypeFont | ImageFont.ImageFont
+"""TrueType-Schrift oder Pillows eingebaute Ersatzschrift."""
 
 # Hintergrund für nicht belegte Zellen (sollte im fertigen Mosaik nicht vorkommen)
 EMPTY_CELL_RGB: RgbTuple = (128, 128, 128)
@@ -38,16 +41,18 @@ def render_placements(
     region: Region,
     stud_px: int,
     draw_part_edges: bool,
+    background: RgbTuple = EMPTY_CELL_RGB,
 ) -> Image.Image:
     """Zeichnet Teile als Noppen-Quadrate mit angedeutetem Noppenkreis.
 
     Args:
-        placements: Die zu zeichnenden Teile.
+        placements: Die zu zeichnenden Teile (spätere übermalen frühere).
         region: Der zu zeichnende Ausschnitt; Zellen außerhalb werden übersprungen.
         stud_px: Kantenlänge einer Noppe in Pixeln.
         draw_part_edges: Umrisse der Teile als Linien einzeichnen.
+        background: Farbe nicht belegter Zellen (z. B. die Farbe des Unterbaus).
     """
-    image = Image.new("RGB", (region.cols * stud_px, region.rows * stud_px), EMPTY_CELL_RGB)
+    image = Image.new("RGB", (region.cols * stud_px, region.rows * stud_px), background)
     draw = ImageDraw.Draw(image)
     placements = list(placements)  # wird zweimal durchlaufen, daher in eine Liste
     for placement in placements:

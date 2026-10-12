@@ -9,8 +9,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any, ClassVar, Protocol
 
 from lego_mosaik.domain.errors import ConfigError
+from lego_mosaik.domain.layout import MAX_STUDS, MIN_STUDS, check_size
 from lego_mosaik.domain.models import (
     MOSAIC_PART_KINDS,
     ColorCategory,
@@ -18,12 +20,12 @@ from lego_mosaik.domain.models import (
     FitMode,
     PartKind,
     Resampling,
+    Substrate,
 )
 
-# Grenzen für die Mosaikgröße in Noppen
-MAX_STUDS = 256  # Gesamtgröße pro Seite
-MIN_IMAGE_STUDS = 4  # Bildfläche innerhalb des Rahmens pro Seite
-MAX_PLATES = 16  # Grundplatten pro Richtung
+MAX_PLATES = 16  # Unterbau-Platten pro Richtung
+MAX_FRAME_RAISE = 3  # höchstens so viele Plates unter einem erhöhten Rahmen
+MAX_PINS_PER_SEAM = 8
 # Erlaubte Größen der Bayer-Matrix beim Ordered Dithering
 BAYER_SIZES = (2, 4, 8)
 # Gültiger Bereich für TCP-Ports
@@ -31,29 +33,73 @@ MIN_PORT = 1
 MAX_PORT = 65535
 
 
-# Deutsche Bezeichnungen für die CLI und API → interne Enum-Werte
+# Deutsche Bezeichnungen für CLI, API und interaktiven Modus → interne Enum-Werte
 FIT_MODE_LABELS: Mapping[str, FitMode] = {"zuschneiden": FitMode.CROP, "einpassen": FitMode.PAD}
 COLOR_DISTANCE_LABELS: Mapping[str, ColorDistance] = {
     "cie76": ColorDistance.CIE76,
     "ciede2000": ColorDistance.CIEDE2000,
 }
+SUBSTRATE_LABELS: Mapping[str, Substrate] = {
+    "art": Substrate.ART_PANEL,
+    "grundplatte": Substrate.BASEPLATE,
+    "ohne": Substrate.NONE,
+}
+# Standardfarbe des Unterbaus, wenn keine angegeben ist (Rebrickable-IDs)
+DEFAULT_SUBSTRATE_COLOR_IDS: Mapping[Substrate, int] = {
+    Substrate.BASEPLATE: 71,  # Light Bluish Gray
+    Substrate.ART_PANEL: 0,  # Black, wie bei LEGO Art
+}
 
 
 @dataclass(frozen=True, slots=True)
 class LayoutConfig:
-    """Größe in Grundplatten, Grundplatte und Rahmen.
+    """Größe und Unterbau.
 
-    Gesamtgröße = Grundplatten × Plattengröße. Die Bildfläche ist die Gesamtgröße
-    minus den Rahmen auf beiden Seiten; der Rahmen liegt auf dem äußeren Ring.
+    Größe entweder als Raster aus Platten (Gesamtgröße = Platten × Plattengröße)
+    oder frei in Noppen (``width_studs``/``height_studs``). Bei freier Größe deckt der
+    Unterbau die Fläche mit aufgerundet vielen Platten ab. Fehlt eine der beiden
+    Seiten, ergibt sie sich aus dem Seitenverhältnis des Bilds.
     """
 
-    baseplate_studs: int = 32  # 16, 32 oder 48 (muss im Katalog als Grundplatte stehen)
-    plates_wide: int = 1  # Grundplatten nebeneinander
-    plates_high: int = 1  # Grundplatten untereinander
-    include_baseplate: bool = True  # Grundplatten in LDraw-Datei und Teilelisten aufnehmen
-    baseplate_color_id: int = 71  # Rebrickable-ID 71 = Light Bluish Gray
-    frame_width: int = 1  # Rahmenbreite in Noppen (0 = kein Rahmen)
-    frame_color_id: int = 0  # Rebrickable-ID 0 = Black
+    substrate: Substrate = Substrate.BASEPLATE
+    plate_studs: int = 32  # Grundplatte 16, 32 oder 48; Art-Paneel 16
+    plates_wide: int = 1  # Platten nebeneinander
+    plates_high: int = 1  # Platten untereinander
+    width_studs: int | None = None  # freie Breite in Noppen (None = aus den Platten)
+    height_studs: int | None = None  # freie Höhe in Noppen
+    substrate_color_id: int | None = None  # None = DEFAULT_SUBSTRATE_COLOR_IDS
+    # Verbindung der Art-Paneele (Annahmen, in Studio prüfen: scripts/orientierung.py)
+    pins_per_seam: int = 2  # Technic-Pins pro Naht zwischen zwei Paneelen
+    connector_color_id: int = 0  # Black
+    connector_depth_ldu: int = 16  # Lochmitte unter der Paneel-Oberkante (Paneel: 32 LDU)
+
+    @property
+    def custom_size(self) -> bool:
+        """True, wenn die Größe frei in Noppen statt in Platten angegeben ist."""
+        return self.width_studs is not None or self.height_studs is not None
+
+
+def substrate_color_id(layout: LayoutConfig) -> int:
+    """Farbe des Unterbaus: angegeben oder Standard für die Unterbau-Art."""
+    if layout.substrate_color_id is not None:
+        return layout.substrate_color_id
+    return DEFAULT_SUBSTRATE_COLOR_IDS.get(layout.substrate, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameConfig:
+    """Rahmen auf dem äußeren Ring des Mosaiks.
+
+    ``raise_plates`` hebt den Rahmen wie bei LEGO Art etwas über das Bild: Unter die
+    Rahmenteile kommen so viele Lagen Plates. Diese Lagen werden „auf Lücke“ gelegt
+    und überbrücken die Nähte zwischen den Platten des Unterbaus.
+    """
+
+    width: int = 1  # Rahmenbreite in Noppen (0 = kein Rahmen)
+    color_id: int = 0  # Rebrickable-ID 0 = Black
+    corner_color_id: int | None = None  # eigene Farbe für die vier Ecken (None = wie Rahmen)
+    part_kinds: tuple[PartKind, ...] | None = None  # z. B. nur TILE; None = wie das Bild
+    raise_plates: int = 0  # 0 = bündig mit dem Bild, 1 = eine Plate höher, …
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,31 +253,52 @@ class AppConfig:
     outputs: tuple[str, ...]
     source: SourceConfig
     output_dir: Path
+    frame: FrameConfig = field(default_factory=FrameConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     ldraw: LdrawConfig = field(default_factory=LdrawConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
 
 
+def frame_part_kinds(config: AppConfig) -> tuple[PartKind, ...]:
+    """Teilarten des Rahmens: eigene Angabe oder dieselben wie im Bild."""
+    return config.frame.part_kinds or config.palette.part_kinds
+
+
 @dataclass(frozen=True, slots=True)
 class MosaicOverrides:
-    """Werte, die CLI oder API für einen einzelnen Lauf überschreiben.
+    """Werte, die CLI, API oder interaktiver Modus für einen einzelnen Lauf überschreiben.
 
-    ``None`` heißt: Wert aus der Konfiguration übernehmen. CLI und API übersetzen
+    ``None`` heißt: Wert aus der Konfiguration übernehmen. Alle Oberflächen übersetzen
     ihre Eingaben in dieses eine Objekt (DRY), geprüft wird nur in ``apply_overrides``.
     """
 
-    baseplate_studs: int | None = None
+    # Größe und Unterbau
+    substrate: Substrate | None = None
+    plate_studs: int | None = None
     plates_wide: int | None = None
     plates_high: int | None = None
-    include_baseplate: bool | None = None
+    width_studs: int | None = None
+    height_studs: int | None = None
+    substrate_color_id: int | None = None
+    # Rahmen
     frame_width: int | None = None
     frame_color_id: int | None = None
+    frame_corner_color_id: int | None = None
+    frame_part_kinds: tuple[PartKind, ...] | None = None
+    frame_raise_plates: int | None = None
+    # Bild
     fit_mode: FitMode | None = None
+    contrast: float | None = None
+    saturation: float | None = None
+    # Farben und Teile
     part_kinds: tuple[PartKind, ...] | None = None
     color_categories: tuple[ColorCategory, ...] | None = None
+    max_colors: int | None = None  # 0 = keine Begrenzung
+    # Verfahren und Ausgaben
     dithering_method: str | None = None
     strength: float | None = None
+    color_distance: ColorDistance | None = None
     tiling_strategy: str | None = None
     outputs: tuple[str, ...] | None = None
     output_dir: Path | None = None
@@ -246,42 +313,67 @@ def apply_overrides(config: AppConfig, overrides: MosaicOverrides) -> AppConfig:
     Raises:
         ConfigError: Wenn die resultierende Konfiguration ungültig ist.
     """
-    layout, dithering = config.layout, config.dithering
+    o = overrides
     run_config = replace(
         config,
-        layout=replace(
-            layout,
-            baseplate_studs=_or_default(overrides.baseplate_studs, layout.baseplate_studs),
-            plates_wide=_or_default(overrides.plates_wide, layout.plates_wide),
-            plates_high=_or_default(overrides.plates_high, layout.plates_high),
-            include_baseplate=_or_default(overrides.include_baseplate, layout.include_baseplate),
-            frame_width=_or_default(overrides.frame_width, layout.frame_width),
-            frame_color_id=_or_default(overrides.frame_color_id, layout.frame_color_id),
+        layout=_merged(
+            config.layout,
+            substrate=o.substrate,
+            plate_studs=o.plate_studs,
+            plates_wide=o.plates_wide,
+            plates_high=o.plates_high,
+            width_studs=o.width_studs,
+            height_studs=o.height_studs,
+            substrate_color_id=o.substrate_color_id,
         ),
-        mosaic=replace(
-            config.mosaic, fit_mode=_or_default(overrides.fit_mode, config.mosaic.fit_mode)
+        frame=_merged(
+            config.frame,
+            width=o.frame_width,
+            color_id=o.frame_color_id,
+            corner_color_id=o.frame_corner_color_id,
+            part_kinds=o.frame_part_kinds,
+            raise_plates=o.frame_raise_plates,
         ),
-        palette=replace(
+        mosaic=_merged(
+            config.mosaic, fit_mode=o.fit_mode, contrast=o.contrast, saturation=o.saturation
+        ),
+        palette=_merged(
             config.palette,
-            part_kinds=_or_default(overrides.part_kinds, config.palette.part_kinds),
-            color_categories=_or_default(
-                overrides.color_categories, config.palette.color_categories
-            ),
+            part_kinds=o.part_kinds,
+            color_categories=o.color_categories,
+            max_colors=o.max_colors,
         ),
-        dithering=replace(
-            dithering,
-            method=_or_default(overrides.dithering_method, dithering.method),
-            strength=_or_default(overrides.strength, dithering.strength),
+        dithering=_merged(
+            config.dithering,
+            method=o.dithering_method,
+            strength=o.strength,
+            color_distance=o.color_distance,
         ),
-        tiling=replace(
-            config.tiling,
-            strategy=_or_default(overrides.tiling_strategy, config.tiling.strategy),
-        ),
-        outputs=_or_default(overrides.outputs, config.outputs),
-        output_dir=_or_default(overrides.output_dir, config.output_dir),
+        tiling=_merged(config.tiling, strategy=o.tiling_strategy),
+        outputs=_or_default(o.outputs, config.outputs),
+        output_dir=_or_default(o.output_dir, config.output_dir),
     )
+    if run_config.palette.max_colors == 0:  # 0 bedeutet „keine Begrenzung“
+        run_config = replace(run_config, palette=replace(run_config.palette, max_colors=None))
     validate_config(run_config)
     return run_config
+
+
+class _Dataclass(Protocol):
+    """Alles, was ``@dataclass`` erzeugt hat (daran erkennt ``replace`` seine Argumente)."""
+
+    __dataclass_fields__: ClassVar[dict[str, Any]]
+
+
+def _merged[T: _Dataclass](target: T, **values: object) -> T:
+    """Kopie von ``target``, in der nur Felder mit Override (nicht ``None``) ersetzt sind.
+
+    ``[T: _Dataclass]`` ist ein Typparameter mit Obergrenze (PEP 695): Es geht jede
+    Dataclass hinein, und genau deren Typ kommt wieder heraus. ``**values`` sammelt
+    alle Schlüsselwort-Argumente in einem dict.
+    """
+    changes = {name: value for name, value in values.items() if value is not None}
+    return replace(target, **changes)
 
 
 def _or_default[T](value: T | None, default: T) -> T:
@@ -302,7 +394,8 @@ def validate_config(config: AppConfig) -> None:
     Raises:
         ConfigError: Bei einem ungültigen Wert.
     """
-    _check_layout(config.layout)
+    _check_frame(config.frame)
+    _check_layout(config.layout, config.frame.width)
     _check_range("Dithering-Stärke", config.dithering.strength, 0.0, 1.0)
     _check_positive("Kontrast", config.mosaic.contrast)
     _check_positive("Sättigung", config.mosaic.saturation)
@@ -342,24 +435,34 @@ def _check_positive(label: str, value: float, *, allow_zero: bool = False) -> No
         raise ConfigError(f"{label} muss {relation} sein (angegeben: {value}).")
 
 
-def _check_layout(layout: LayoutConfig) -> None:
-    """Grundplatten-Anzahl, Gesamtgröße und verbleibende Bildfläche."""
-    _check_range("Grundplatten nebeneinander", layout.plates_wide, 1, MAX_PLATES)
-    _check_range("Grundplatten untereinander", layout.plates_high, 1, MAX_PLATES)
-    _check_range("Grundplattengröße", layout.baseplate_studs, 1, MAX_STUDS, "Noppen")
-    _check_positive("Rahmenbreite", layout.frame_width, allow_zero=True)
-    longest = layout.baseplate_studs * max(layout.plates_wide, layout.plates_high)
-    if longest > MAX_STUDS:
-        raise ConfigError(
-            f"Das Mosaik darf höchstens {MAX_STUDS} Noppen pro Seite haben "
-            f"(angegeben: {longest} Noppen)."
+def _check_layout(layout: LayoutConfig, frame_width: int) -> None:
+    """Plattenanzahl, Gesamtgröße und verbleibende Bildfläche."""
+    _check_range("Platten nebeneinander", layout.plates_wide, 1, MAX_PLATES)
+    _check_range("Platten untereinander", layout.plates_high, 1, MAX_PLATES)
+    _check_range("Plattengröße", layout.plate_studs, 1, MAX_STUDS, "Noppen")
+    _check_range("Pins pro Naht", layout.pins_per_seam, 1, MAX_PINS_PER_SEAM)
+    if not layout.custom_size:
+        check_size(
+            layout.plate_studs * layout.plates_wide,
+            layout.plate_studs * layout.plates_high,
+            frame_width,
         )
-    shortest = layout.baseplate_studs * min(layout.plates_wide, layout.plates_high)
-    if shortest - 2 * layout.frame_width < MIN_IMAGE_STUDS:
-        raise ConfigError(
-            f"Der Rahmen ist zu breit: Innen müssen mindestens {MIN_IMAGE_STUDS} Noppen "
-            "für das Bild bleiben."
-        )
+        return
+    # Freie Größe: angegebene Seiten jetzt prüfen; eine fehlende Seite ergibt sich
+    # erst aus dem Bild und wird dann in der Pipeline geprüft
+    for label, value in (("Breite", layout.width_studs), ("Höhe", layout.height_studs)):
+        if value is not None:
+            _check_range(label, value, MIN_STUDS, MAX_STUDS, "Noppen")
+    if layout.width_studs is not None and layout.height_studs is not None:
+        check_size(layout.width_studs, layout.height_studs, frame_width)
+
+
+def _check_frame(frame: FrameConfig) -> None:
+    """Rahmenbreite, Erhöhung und Teilarten des Rahmens."""
+    _check_positive("Rahmenbreite", frame.width, allow_zero=True)
+    _check_range("Rahmen-Erhöhung", frame.raise_plates, 0, MAX_FRAME_RAISE, "Plates")
+    if frame.part_kinds is not None:
+        _check_part_kinds(frame.part_kinds)
 
 
 def _check_part_kinds(part_kinds: tuple[PartKind, ...]) -> None:
@@ -380,46 +483,84 @@ def _check_unique_non_empty(label: str, values: tuple[str, ...]) -> None:
         raise ConfigError(f"{label}: Jeder Wert darf nur einmal vorkommen ({_join(values)}).")
 
 
-def parse_overrides(
-    *,
-    baseplate_studs: int | None = None,
-    plates: str | None = None,
-    frame_width: int | None = None,
-    frame_color_id: int | None = None,
-    include_baseplate: bool | None = None,
-    fit_mode: str | None = None,
-    part_kinds: str | None = None,
-    color_categories: str | None = None,
-    exotic_colors: bool = False,
-    dithering_method: str | None = None,
-    strength: float | None = None,
-    tiling_strategy: str | None = None,
-    outputs: str | None = None,
-    output_dir: Path | None = None,
-) -> MosaicOverrides:
-    """Übersetzt Texteingaben aus CLI oder API in ``MosaicOverrides`` (DRY: nur hier).
+@dataclass(frozen=True, slots=True)
+class OverrideInput:
+    """Rohe Eingaben (Text und Zahlen), so wie sie von CLI, API oder interaktivem Modus kommen.
+
+    Alle drei Oberflächen füllen nur dieses Objekt; ``parse_overrides`` übersetzt es
+    an einer einzigen Stelle in Fachwerte (DRY). ``None`` = Standard aus ``CONFIG``.
+    """
+
+    # Größe und Unterbau
+    substrate: str | None = None  # art, grundplatte, ohne
+    plate_studs: int | None = None
+    plates: str | None = None  # BxH, z. B. "3x3"
+    width_studs: int | None = None
+    height_studs: int | None = None
+    substrate_color_id: int | None = None
+    # Rahmen
+    frame_width: int | None = None
+    frame_color_id: int | None = None
+    frame_corner_color_id: int | None = None
+    frame_part_kinds: str | None = None  # z. B. "tile"
+    frame_raise_plates: int | None = None
+    # Bild
+    fit_mode: str | None = None  # zuschneiden, einpassen
+    contrast: float | None = None
+    saturation: float | None = None
+    # Farben und Teile
+    part_kinds: str | None = None  # z. B. "plate,tile"
+    color_categories: str | None = None  # z. B. "solid,pearl"
+    exotic_colors: bool = False
+    max_colors: int | None = None  # 0 = keine Begrenzung
+    # Verfahren und Ausgaben
+    dithering_method: str | None = None
+    strength: float | None = None
+    color_distance: str | None = None  # cie76, ciede2000
+    tiling_strategy: str | None = None
+    outputs: str | None = None  # z. B. "preview_png,ldraw"
+    output_dir: Path | None = None
+
+
+def parse_overrides(raw: OverrideInput) -> MosaicOverrides:
+    """Übersetzt rohe Eingaben in ``MosaicOverrides`` (Namen → Enums, Listen → Tupel).
 
     Raises:
         ConfigError: Bei unbekannten Namen oder falschem Format.
     """
     # Bedingter Ausdruck: Ohne Angabe bleibt das Tupel (None, None) → Standardwerte
-    wide, high = parse_plates(plates) if plates else (None, None)
+    wide, high = parse_plates(raw.plates) if raw.plates else (None, None)
     return MosaicOverrides(
-        baseplate_studs=baseplate_studs,
+        substrate=_parse_label(SUBSTRATE_LABELS, raw.substrate, "Unterbau"),
+        plate_studs=raw.plate_studs,
         plates_wide=wide,
         plates_high=high,
-        include_baseplate=include_baseplate,
-        frame_width=frame_width,
-        frame_color_id=frame_color_id,
-        fit_mode=parse_fit_mode(fit_mode) if fit_mode else None,
-        part_kinds=parse_part_kinds(part_kinds) if part_kinds else None,
-        color_categories=combine_categories(color_categories, exotic=exotic_colors),
-        dithering_method=dithering_method,
-        strength=strength,
-        tiling_strategy=tiling_strategy,
-        outputs=parse_names(outputs) if outputs else None,
-        output_dir=output_dir,
+        width_studs=raw.width_studs,
+        height_studs=raw.height_studs,
+        substrate_color_id=raw.substrate_color_id,
+        frame_width=raw.frame_width,
+        frame_color_id=raw.frame_color_id,
+        frame_corner_color_id=raw.frame_corner_color_id,
+        frame_part_kinds=parse_part_kinds(raw.frame_part_kinds) if raw.frame_part_kinds else None,
+        frame_raise_plates=raw.frame_raise_plates,
+        fit_mode=_parse_label(FIT_MODE_LABELS, raw.fit_mode, "Modus"),
+        contrast=raw.contrast,
+        saturation=raw.saturation,
+        part_kinds=parse_part_kinds(raw.part_kinds) if raw.part_kinds else None,
+        color_categories=combine_categories(raw.color_categories, exotic=raw.exotic_colors),
+        max_colors=raw.max_colors,
+        dithering_method=raw.dithering_method,
+        strength=raw.strength,
+        color_distance=_parse_label(COLOR_DISTANCE_LABELS, raw.color_distance, "Farbabstand"),
+        tiling_strategy=raw.tiling_strategy,
+        outputs=parse_names(raw.outputs) if raw.outputs else None,
+        output_dir=raw.output_dir,
     )
+
+
+def _parse_label[T](labels: Mapping[str, T], text: str | None, label: str) -> T | None:
+    """Deutsche Bezeichnung → Wert; ``None`` oder leer bleibt ``None`` (= Standard)."""
+    return _lookup(labels, _key(text), label) if text else None
 
 
 def combine_categories(text: str | None, *, exotic: bool) -> tuple[ColorCategory, ...] | None:
@@ -507,7 +648,18 @@ def parse_color_categories(text: str) -> tuple[ColorCategory, ...]:
 
 def parse_fit_mode(text: str) -> FitMode:
     """Wandelt ``"zuschneiden"`` bzw. ``"einpassen"`` in einen ``FitMode`` um."""
-    return _lookup(FIT_MODE_LABELS, text.strip().lower(), "Modus")
+    return _lookup(FIT_MODE_LABELS, _key(text), "Modus")
+
+
+def label_of[T](labels: Mapping[str, T], value: T) -> str:
+    """Deutsche Bezeichnung zu einem Wert (Umkehrung der ``*_LABELS``-Tabellen)."""
+    # next(...) liefert das erste Element des Generators; str(value) ist der Notnagel
+    return next((label for label, item in labels.items() if item == value), str(value))
+
+
+def _key(text: str) -> str:
+    """Normalisiert eine Texteingabe für die Suche in den Bezeichnungs-Tabellen."""
+    return text.strip().lower()
 
 
 def _lookup[T](choices: Mapping[str, T], name: str, label: str) -> T:

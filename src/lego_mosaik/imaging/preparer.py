@@ -6,8 +6,8 @@ lazy import numpy as np
 
 from lego_mosaik.domain.models import FitMode, Resampling, RgbTuple
 from lego_mosaik.imaging.fitting import enhance, fit_image
-from lego_mosaik.imaging.loader import load_image
-from lego_mosaik.imaging.protocol import RgbImage
+from lego_mosaik.imaging.loader import inspect_image, load_image
+from lego_mosaik.imaging.protocol import ImageInfo, RgbImage
 
 
 class PillowImagePreparer:
@@ -30,6 +30,10 @@ class PillowImagePreparer:
         self._resampling = resampling
         self._contrast = contrast
         self._saturation = saturation
+
+    def inspect(self, source: Path | bytes) -> ImageInfo:
+        """Größe und Format des Bilds (z. B. für eine Seite aus dem Seitenverhältnis)."""
+        return inspect_image(source)
 
     def prepare(
         self, source: Path | bytes, *, width: int, height: int, pad_color: RgbTuple

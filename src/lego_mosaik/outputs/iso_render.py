@@ -8,8 +8,9 @@ bleiben gerade und abzählbar, Noppen und Vorderkanten wirken trotzdem plastisch
 
 Verdeckung: Painter's Algorithm. Jede Zelle wird als kleine Säule gezeichnet,
 von hinten nach vorne. Was näher ist, wird später gemalt und überdeckt damit
-korrekt, was dahinter liegt. Weil alle Teile gleich hoch sind und in einer Ebene
-liegen, reicht das Sortieren nach der Tiefe des Zellmittelpunkts.
+korrekt, was dahinter liegt. Die Säulen stehen auf einem regelmäßigen Raster;
+deshalb reicht das Sortieren nach der Tiefe des Zellmittelpunkts, auch wenn
+einzelne Säulen (z. B. ein erhöhter Rahmen) höher sind als ihre Nachbarn.
 
 Koordinaten wie in LDraw (1 Noppe = 20 LDU), aber mit y nach **oben**:
 x = Spalten nach rechts, z = Zeilen nach vorne (zum Betrachter), y = Höhe.
@@ -57,12 +58,29 @@ class RenderCell:
             zum selben Teil (dort werden keine Kanten gezeichnet).
         has_stud: True bei Plates und Bricks, False bei Tiles (glatt).
         highlighted: True bei neuen Teilen des aktuellen Schritts (orange Umrandung).
+        top_ldu: Höhe der Oberseite über dem Unterbau in LDU (Plate = 8).
     """
 
     rgb: RgbTuple
     part_id: int
     has_stud: bool = True
     highlighted: bool = False
+    top_ldu: float = PLATE_HEIGHT
+
+
+@dataclass(frozen=True, slots=True)
+class Underlay:
+    """Unterbau unter dem gerenderten Bereich.
+
+    Attributes:
+        rgb: Farbe der Grundplatten bzw. Paneele.
+        thickness_ldu: Dicke (Grundplatte ca. 3 LDU, Art-Paneel 32 LDU).
+        seam_studs: Abstand der Fugen zwischen den Platten in Noppen (``None`` = keine).
+    """
+
+    rgb: RgbTuple
+    thickness_ldu: float = BASEPLATE_THICKNESS
+    seam_studs: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +134,7 @@ def render_iso(
     area: Area,
     view: IsoView,
     *,
-    baseplate_rgb: RgbTuple | None,
+    underlay: Underlay | None,
     max_width: int,
     max_height: int,
     supersample: int = 2,
@@ -129,16 +147,22 @@ def render_iso(
         cells: Belegte Zellen (Zeile, Spalte) → Inhalt; fehlende Zellen sind leer.
         area: Der zu zeichnende Bereich.
         view: Kamerawinkel.
-        baseplate_rgb: Farbe der Grundplatte unter dem Bereich oder ``None``.
+        underlay: Unterbau unter dem Bereich oder ``None``.
         max_width: Höchstbreite des Bilds in Pixeln.
         max_height: Höchsthöhe des Bilds in Pixeln.
         supersample: Intern so viel größer zeichnen und dann verkleinern (Kantenglättung).
         scale: Feste Pixel pro LDU (z. B. für gleich große Teile-Icons) statt Einpassen.
         background: Hintergrundfarbe des Bilds.
     """
-    canvas = _Canvas.create(area, view, max_width, max_height, supersample, scale, background)
-    if baseplate_rgb is not None:
-        canvas.draw_baseplate(baseplate_rgb)
+    heights = _Heights(
+        bottom=-underlay.thickness_ldu if underlay else 0.0,
+        top=max((cell.top_ldu for cell in cells.values()), default=PLATE_HEIGHT),
+    )
+    canvas = _Canvas.create(
+        area, view, heights, (max_width, max_height), supersample, scale, background
+    )
+    if underlay is not None:
+        canvas.draw_underlay(underlay)
     ordered = sorted(
         (
             (row, col)
@@ -151,14 +175,27 @@ def render_iso(
         content = cells.get(cell)
         if content is not None:
             canvas.draw_cell(cell, content, cells)
-        elif baseplate_rgb is not None:
-            canvas.draw_stud(cell, 0.0, baseplate_rgb)
+        elif underlay is not None:
+            canvas.draw_stud(cell, 0.0, underlay.rgb)
     # Zweiter Durchgang: Umrandungen obenauf, damit keine Nachbarzelle sie übermalt
     for cell in ordered:
         content = cells.get(cell)
         if content is not None and content.highlighted:
             canvas.draw_highlight(cell, content, cells)
     return canvas.finish()
+
+
+@dataclass(frozen=True, slots=True)
+class _Heights:
+    """Tiefster und höchster Punkt der Szene in LDU (für den Bildausschnitt)."""
+
+    bottom: float
+    top: float
+
+
+def _top_of(content: RenderCell | None) -> float:
+    """Oberseite einer Zelle; eine leere Zelle endet auf dem Unterbau (Höhe 0)."""
+    return content.top_ldu if content is not None else 0.0
 
 
 @dataclass(slots=True)
@@ -178,18 +215,19 @@ class _Canvas:
         cls,
         area: Area,
         view: IsoView,
-        max_width: int,
-        max_height: int,
+        heights: _Heights,
+        max_size: tuple[int, int],
         supersample: int,
         scale: float | None,
         background: RgbTuple,
     ) -> _Canvas:
         """Berechnet Maßstab und Bildgröße aus den projizierten Ecken des Bereichs."""
+        max_width, max_height = max_size
         corners = [
             view.project(x, y, z)
             for x in (area.col * LDU_PER_STUD, (area.col + area.cols) * LDU_PER_STUD)
             for z in (area.row * LDU_PER_STUD, (area.row + area.rows) * LDU_PER_STUD)
-            for y in (-BASEPLATE_THICKNESS, PLATE_HEIGHT + STUD_HEIGHT)
+            for y in (heights.bottom, heights.top + STUD_HEIGHT)
         ]
         xs, ys = [p[0] for p in corners], [p[1] for p in corners]
         span_x, span_y = max(xs) - min(xs), max(ys) - min(ys)
@@ -220,11 +258,12 @@ class _Canvas:
         width = max(1, round(self.scale * 0.6))
         self.draw.line([self.point(*start), self.point(*end)], fill=rgb, width=width)
 
-    def draw_baseplate(self, rgb: RgbTuple) -> None:
-        """Dünne Platte unter dem ganzen Bereich (Oberseite, Vorder- und rechte Seite)."""
+    def draw_underlay(self, underlay: Underlay) -> None:
+        """Unterbau unter dem ganzen Bereich (Oberseite, Vorder- und rechte Seite, Fugen)."""
+        rgb = underlay.rgb
         x0, x1 = self.area.col * LDU_PER_STUD, (self.area.col + self.area.cols) * LDU_PER_STUD
         z0, z1 = self.area.row * LDU_PER_STUD, (self.area.row + self.area.rows) * LDU_PER_STUD
-        bottom = -BASEPLATE_THICKNESS
+        bottom = -underlay.thickness_ldu
         self.polygon(
             [(x0, bottom, z1), (x1, bottom, z1), (x1, 0, z1), (x0, 0, z1)], shade(rgb, FRONT_SHADE)
         )
@@ -232,29 +271,52 @@ class _Canvas:
             side = [(x1, bottom, z0), (x1, bottom, z1), (x1, 0, z1), (x1, 0, z0)]
             self.polygon(side, shade(rgb, SIDE_SHADE))
         self.polygon([(x0, 0, z0), (x1, 0, z0), (x1, 0, z1), (x0, 0, z1)], rgb)
+        if underlay.seam_studs is not None:
+            self._draw_seams(underlay.seam_studs, bottom, edge_color(rgb))
+
+    def _draw_seams(self, seam_studs: int, bottom: float, rgb: RgbTuple) -> None:
+        """Fugen zwischen den Platten: Linien auf der Oberseite und auf der Vorderseite."""
+        area = self.area
+        x0, x1 = area.col * LDU_PER_STUD, (area.col + area.cols) * LDU_PER_STUD
+        z0, z1 = area.row * LDU_PER_STUD, (area.row + area.rows) * LDU_PER_STUD
+        # Fugen liegen bei Vielfachen von seam_studs, aber nicht auf dem Rand des Bereichs
+        for col in range(area.col + 1, area.col + area.cols):
+            if col % seam_studs == 0:
+                x = col * LDU_PER_STUD
+                self.line((x, 0, z0), (x, 0, z1), rgb)
+                self.line((x, bottom, z1), (x, 0, z1), rgb)
+        for row in range(area.row + 1, area.row + area.rows):
+            if row % seam_studs == 0:
+                z = row * LDU_PER_STUD
+                self.line((x0, 0, z), (x1, 0, z), rgb)
 
     def draw_cell(self, cell: Cell, content: RenderCell, cells: Mapping[Cell, RenderCell]) -> None:
-        """Eine Zelle als Säule: sichtbare Seiten, Oberseite, Kanten, ggf. Noppe."""
+        """Eine Zelle als Säule: sichtbare Seiten, Oberseite, Kanten, ggf. Noppe.
+
+        Eine Seite ist sichtbar, soweit die Nachbarsäule davor (bzw. rechts) niedriger
+        ist. Bei gleich hohen Nachbarn bleibt sie verdeckt.
+        """
         row, col = cell
-        rgb = content.rgb
+        rgb, top = content.rgb, content.top_ldu
         x0, z0 = col * LDU_PER_STUD, row * LDU_PER_STUD
-        x1, z1, top = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD, PLATE_HEIGHT
-        front_open = (row + 1, col) not in cells
-        right_open = self.view.shows_side_faces and (row, col + 1) not in cells
-        if front_open:  # Vorderseite nur sichtbar, wenn davor nichts steht
+        x1, z1 = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD
+        front_base = _top_of(cells.get((row + 1, col)))
+        right_base = _top_of(cells.get((row, col + 1))) if self.view.shows_side_faces else top
+        faces = _Faces(front_base, right_base, top)
+        if faces.front_open:  # Vorderseite ab der Oberkante des Nachbarn davor
             self.polygon(
-                [(x0, 0, z1), (x1, 0, z1), (x1, top, z1), (x0, top, z1)], shade(rgb, FRONT_SHADE)
+                [(x0, front_base, z1), (x1, front_base, z1), (x1, top, z1), (x0, top, z1)],
+                shade(rgb, FRONT_SHADE),
             )
-        if right_open:
+        if faces.right_open:
             self.polygon(
-                [(x1, 0, z0), (x1, 0, z1), (x1, top, z1), (x1, top, z0)], shade(rgb, SIDE_SHADE)
+                [(x1, right_base, z0), (x1, right_base, z1), (x1, top, z1), (x1, top, z0)],
+                shade(rgb, SIDE_SHADE),
             )
         self.polygon([(x0, top, z0), (x1, top, z0), (x1, top, z1), (x0, top, z1)], rgb)
-        self._draw_edges(
-            cell, content, cells, edge_color(rgb), front_open=front_open, right_open=right_open
-        )
+        self._draw_edges(cell, content, cells, edge_color(rgb), faces)
         if content.has_stud:
-            self.draw_stud(cell, PLATE_HEIGHT, rgb)
+            self.draw_stud(cell, top, rgb)
 
     def _draw_edges(
         self,
@@ -262,14 +324,12 @@ class _Canvas:
         content: RenderCell,
         cells: Mapping[Cell, RenderCell],
         rgb: RgbTuple,
-        *,
-        front_open: bool,
-        right_open: bool,
+        faces: _Faces,
     ) -> None:
         """Kanten nur an Teilgrenzen, damit lange Teile als ein Stück erscheinen."""
         row, col = cell
         x0, z0 = col * LDU_PER_STUD, row * LDU_PER_STUD
-        x1, z1, top = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD, PLATE_HEIGHT
+        x1, z1, top = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD, faces.top
 
         def boundary(neighbor: Cell) -> bool:
             other = cells.get(neighbor)
@@ -284,17 +344,19 @@ class _Canvas:
         for neighbor, (start, end) in top_edges.items():
             if boundary(neighbor):
                 self.line(start, end, rgb)
-        if front_open:
-            self.line((x0, 0, z1), (x1, 0, z1), rgb)
+        if faces.front_open:
+            self.line((x0, faces.front_base, z1), (x1, faces.front_base, z1), rgb)
             if boundary((row, col - 1)):
-                self.line((x0, 0, z1), (x0, top, z1), rgb)
-        if right_open:
-            self.line((x1, 0, z0), (x1, 0, z1), rgb)
+                self.line((x0, faces.front_base, z1), (x0, top, z1), rgb)
+        if faces.right_open:
+            self.line((x1, faces.right_base, z0), (x1, faces.right_base, z1), rgb)
             if boundary((row - 1, col)):
-                self.line((x1, 0, z0), (x1, top, z0), rgb)
+                self.line((x1, faces.right_base, z0), (x1, top, z0), rgb)
         # Vordere rechte Ecke: nur dort, wo das Teil rechts bzw. vorne endet
-        if (front_open and boundary((row, col + 1))) or (right_open and boundary((row + 1, col))):
-            self.line((x1, 0, z1), (x1, top, z1), rgb)
+        front_corner = faces.front_open and boundary((row, col + 1))
+        if front_corner or (faces.right_open and boundary((row + 1, col))):
+            base = faces.front_base if front_corner else faces.right_base
+            self.line((x1, base, z1), (x1, top, z1), rgb)
 
     def draw_highlight(
         self, cell: Cell, content: RenderCell, cells: Mapping[Cell, RenderCell]
@@ -302,7 +364,7 @@ class _Canvas:
         """Orange Umrandung entlang der Teilgrenzen auf der Oberseite einer Zelle."""
         row, col = cell
         x0, z0 = col * LDU_PER_STUD, row * LDU_PER_STUD
-        x1, z1, top = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD, PLATE_HEIGHT
+        x1, z1, top = x0 + LDU_PER_STUD, z0 + LDU_PER_STUD, content.top_ldu
         edges = {
             (row - 1, col): ((x0, top, z0), (x1, top, z0)),
             (row + 1, col): ((x0, top, z1), (x1, top, z1)),
@@ -348,6 +410,23 @@ class _Canvas:
         genau die richtige Filterung für Supersampling und viel schneller als LANCZOS.
         """
         return self.image if self.supersample == 1 else self.image.reduce(self.supersample)
+
+
+@dataclass(frozen=True, slots=True)
+class _Faces:
+    """Welche Seitenflächen einer Säule sichtbar sind und ab welcher Höhe."""
+
+    front_base: float  # Oberkante des Nachbarn davor
+    right_base: float  # Oberkante des Nachbarn rechts
+    top: float  # Oberkante der Säule selbst
+
+    @property
+    def front_open(self) -> bool:
+        return self.front_base < self.top
+
+    @property
+    def right_open(self) -> bool:
+        return self.right_base < self.top
 
 
 def _ellipse_box(
