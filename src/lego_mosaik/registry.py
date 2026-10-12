@@ -16,7 +16,17 @@ from collections.abc import Callable, Mapping
 
 from lego_mosaik.config import AppConfig
 from lego_mosaik.domain.errors import ConfigError
+lazy from lego_mosaik.dithering.error_diffusion import (
+    ATKINSON,
+    FLOYD_STEINBERG,
+    SIERRA_LITE,
+    DiffusionKernel,
+    ErrorDiffusionDitherer,
+)
+lazy from lego_mosaik.dithering.nearest import NearestColorDitherer
+lazy from lego_mosaik.dithering.ordered import OrderedDitherer
 lazy from lego_mosaik.dithering.protocol import Ditherer
+lazy from lego_mosaik.imaging.color_space import LabColorSpace
 lazy from lego_mosaik.outputs.protocol import OutputWriter
 lazy from lego_mosaik.tiling.protocol import TilingStrategy
 
@@ -25,7 +35,35 @@ type DithererFactory = Callable[[AppConfig], Ditherer]
 type TilingFactory = Callable[[AppConfig], TilingStrategy]
 type OutputWriterFactory = Callable[[AppConfig], OutputWriter]
 
-DITHERERS: dict[str, DithererFactory] = {}
+
+def _color_space(config: AppConfig) -> LabColorSpace:
+    """Farbsuche mit dem konfigurierten Farbabstand (für alle Dithering-Verfahren)."""
+    return LabColorSpace(config.dithering.color_distance)
+
+
+def _error_diffusion(config: AppConfig, kernel: DiffusionKernel) -> ErrorDiffusionDitherer:
+    """Fehlerdiffusion mit dem gegebenen Kernel und den Werten aus der Konfiguration."""
+    return ErrorDiffusionDitherer(
+        kernel,
+        _color_space(config),
+        strength=config.dithering.strength,
+        serpentine=config.dithering.serpentine,
+    )
+
+
+# Die lambdas werden erst beim Aufruf ausgewertet; dadurch bleiben die lazy
+# importierten Module (und NumPy/scikit-image) bis zum ersten Mosaik ungeladen.
+DITHERERS: dict[str, DithererFactory] = {
+    "nearest": lambda config: NearestColorDitherer(_color_space(config)),
+    "floyd_steinberg": lambda config: _error_diffusion(config, FLOYD_STEINBERG),
+    "atkinson": lambda config: _error_diffusion(config, ATKINSON),
+    "sierra_lite": lambda config: _error_diffusion(config, SIERRA_LITE),
+    "ordered": lambda config: OrderedDitherer(
+        _color_space(config),
+        size=config.dithering.bayer_size,
+        spread=config.dithering.spread,
+    ),
+}
 
 TILING_STRATEGIES: dict[str, TilingFactory] = {}
 

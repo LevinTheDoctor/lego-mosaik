@@ -20,6 +20,8 @@ import gzip
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+import numpy as np
+import numpy.typing as npt
 import pytest
 
 from lego_mosaik.config import (
@@ -184,3 +186,31 @@ def app_config(tmp_path: Path) -> AppConfig:
         source=SourceConfig(data_dir=tmp_path / "rebrickable", auto_update=False),
         output_dir=tmp_path / "ausgabe",
     )
+
+
+# --- Testbilder (8 × 8), direkt als Arrays erzeugt ----------------------------------
+
+type RgbArray = npt.NDArray[np.uint8]
+
+
+def solid_image(rgb: tuple[int, int, int], size: int = 8) -> RgbArray:
+    """Einfarbiges RGB-Bild (size × size)."""
+    # np.full füllt ein Array der Form (H, W, 3) mit dem RGB-Tupel (per Broadcasting)
+    return np.full((size, size, 3), rgb, dtype=np.uint8)
+
+
+def gray_gradient(size: int = 8) -> RgbArray:
+    """Horizontaler Grauverlauf von Schwarz nach Weiß."""
+    values = np.linspace(0, 255, size).round().astype(np.uint8)
+    # np.tile(values, (size, 1)) wiederholt die Zeile size-mal → (H, W); dann auf 3 Kanäle
+    return np.repeat(np.tile(values, (size, 1))[:, :, np.newaxis], 3, axis=2)
+
+
+def color_blocks(size: int = 8) -> RgbArray:
+    """Vier Quadranten in Rot, Blau, Weiß und Schwarz."""
+    image = np.zeros((size, size, 3), dtype=np.uint8)
+    half = size // 2
+    image[:half, :half] = (201, 26, 9)  # Red
+    image[:half, half:] = (0, 85, 191)  # Blue
+    image[half:, :half] = (255, 255, 255)  # White
+    return image

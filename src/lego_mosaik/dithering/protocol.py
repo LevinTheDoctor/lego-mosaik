@@ -20,3 +20,23 @@ class Ditherer(Protocol):
             palette_lab: Palette als P×3-Array im Lab-Raum.
         """
         ...
+
+
+class ColorSpace(Protocol):
+    """Farbsuche und Farbraum-Umrechnung, die Dithering-Verfahren benötigen.
+
+    Die Implementierung (``imaging.color_space.LabColorSpace``) wird von außen
+    übergeben. So hängt ``dithering`` nicht von ``imaging`` ab.
+    """
+
+    def nearest(self, pixels_lab: FloatImage, palette_lab: FloatImage) -> IndexGrid:
+        """Index der nächsten Palettenfarbe für Lab-Werte der Form ``(..., 3)``."""
+        ...
+
+    def to_rgb(self, lab: FloatImage) -> FloatImage:
+        """Lab → RGB (0.0–255.0)."""
+        ...
+
+    def to_lab(self, rgb: FloatImage) -> FloatImage:
+        """RGB (0–255) → Lab."""
+        ...

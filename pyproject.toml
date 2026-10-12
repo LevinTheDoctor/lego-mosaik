@@ -48,6 +48,8 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 python_version = "3.15"
 strict = true
 files = ["src"]
+# scikit-image ist nur teilweise annotiert (z. B. deltaE_ciede2000); Aufrufe trotzdem erlauben
+untyped_calls_exclude = ["skimage"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
