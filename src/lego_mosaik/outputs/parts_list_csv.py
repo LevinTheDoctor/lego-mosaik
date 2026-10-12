@@ -12,6 +12,10 @@ FILE_NAME = "teileliste.csv"
 REBRICKABLE_FILE_NAME = "teileliste_rebrickable.csv"
 # utf-8-sig schreibt ein BOM (Byte Order Mark) an den Anfang; daran erkennt Excel UTF-8
 ENCODING = "utf-8-sig"
+# Deutsches Excel erwartet ";" als Trennzeichen (das Komma ist dort Dezimalzeichen);
+# das Rebrickable-Importformat verlangt dagegen Kommas
+GERMAN_DELIMITER = ";"
+REBRICKABLE_DELIMITER = ","
 HEADER = ("Teil-Nr.", "Teilname", "Farb-ID", "Farbname", "Anzahl", "Element-ID")
 REBRICKABLE_HEADER = ("Part", "Color", "Quantity")
 
@@ -23,11 +27,14 @@ class PartsListCsvWriter:
 
     def write(self, mosaic: Mosaic, target_dir: Path) -> Path:
         """Schreibt beide Listen und gibt den Pfad der eigenen Liste zurück."""
-        parts_list = PartsList.from_placements(mosaic.placements)
+        parts_list = PartsList.from_placements(mosaic.all_parts)
         path = target_dir / FILE_NAME
-        _write_csv(path, HEADER, _detail_rows(mosaic, parts_list))
+        _write_csv(path, HEADER, _detail_rows(mosaic, parts_list), GERMAN_DELIMITER)
         _write_csv(
-            target_dir / REBRICKABLE_FILE_NAME, REBRICKABLE_HEADER, _rebrickable_rows(parts_list)
+            target_dir / REBRICKABLE_FILE_NAME,
+            REBRICKABLE_HEADER,
+            _rebrickable_rows(parts_list),
+            REBRICKABLE_DELIMITER,
         )
         logger.info(
             "Teilelisten geschrieben: %d Positionen, %d Teile.",
@@ -58,9 +65,11 @@ def _rebrickable_rows(parts_list: PartsList) -> list[tuple[object, ...]]:
     return [(entry.part.part_num, entry.color.id, entry.quantity) for entry in parts_list.entries]
 
 
-def _write_csv(path: Path, header: tuple[str, ...], rows: list[tuple[object, ...]]) -> None:
+def _write_csv(
+    path: Path, header: tuple[str, ...], rows: list[tuple[object, ...]], delimiter: str
+) -> None:
     """Schreibt eine CSV-Datei mit Kopfzeile."""
     with path.open("w", encoding=ENCODING, newline="") as handle:
-        writer = csv.writer(handle)
+        writer = csv.writer(handle, delimiter=delimiter)
         writer.writerow(header)
         writer.writerows(rows)

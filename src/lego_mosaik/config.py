@@ -10,11 +10,19 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from lego_mosaik.domain.errors import ConfigError
-from lego_mosaik.domain.models import ColorCategory, ColorDistance, FitMode, PartKind, Resampling
+from lego_mosaik.domain.models import (
+    MOSAIC_PART_KINDS,
+    ColorCategory,
+    ColorDistance,
+    FitMode,
+    PartKind,
+    Resampling,
+)
 
 # Grenzen für die Mosaikgröße in Noppen
-MIN_STUDS = 8
-MAX_STUDS = 256
+MAX_STUDS = 256  # Gesamtgröße pro Seite
+MIN_IMAGE_STUDS = 4  # Bildfläche innerhalb des Rahmens pro Seite
+MAX_PLATES = 16  # Grundplatten pro Richtung
 # Erlaubte Größen der Bayer-Matrix beim Ordered Dithering
 BAYER_SIZES = (2, 4, 8)
 # Gültiger Bereich für TCP-Ports
@@ -31,11 +39,26 @@ COLOR_DISTANCE_LABELS: Mapping[str, ColorDistance] = {
 
 
 @dataclass(frozen=True, slots=True)
-class MosaicConfig:
-    """Größe des Mosaiks und Bildaufbereitung."""
+class LayoutConfig:
+    """Größe in Grundplatten, Grundplatte und Rahmen.
 
-    width_studs: int
-    height_studs: int
+    Gesamtgröße = Grundplatten × Plattengröße. Die Bildfläche ist die Gesamtgröße
+    minus den Rahmen auf beiden Seiten; der Rahmen liegt auf dem äußeren Ring.
+    """
+
+    baseplate_studs: int = 32  # 16, 32 oder 48 (muss im Katalog als Grundplatte stehen)
+    plates_wide: int = 1  # Grundplatten nebeneinander
+    plates_high: int = 1  # Grundplatten untereinander
+    include_baseplate: bool = True  # Grundplatten in LDraw-Datei und Teilelisten aufnehmen
+    baseplate_color_id: int = 71  # Rebrickable-ID 71 = Light Bluish Gray
+    frame_width: int = 1  # Rahmenbreite in Noppen (0 = kein Rahmen)
+    frame_color_id: int = 0  # Rebrickable-ID 0 = Black
+
+
+@dataclass(frozen=True, slots=True)
+class MosaicConfig:
+    """Bildaufbereitung: Einpassen, Randfarbe, Skalierung, Kontrast und Sättigung."""
+
     fit_mode: FitMode = FitMode.CROP
     pad_color_id: int = 15  # Rebrickable-ID 15 = White
     resampling: Resampling = Resampling.BOX
@@ -112,7 +135,6 @@ class LdrawConfig:
     """Aufbau der LDraw-Datei."""
 
     rows_per_step: int = 4
-    include_baseplate: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +177,7 @@ class ServerConfig:
 class AppConfig:
     """Gesamte Konfiguration. Wird einmal in ``main.py`` erzeugt."""
 
+    layout: LayoutConfig
     mosaic: MosaicConfig
     palette: PaletteConfig
     dithering: DitheringConfig
@@ -176,8 +199,12 @@ class MosaicOverrides:
     ihre Eingaben in dieses eine Objekt (DRY), geprüft wird nur in ``apply_overrides``.
     """
 
-    width_studs: int | None = None
-    height_studs: int | None = None
+    baseplate_studs: int | None = None
+    plates_wide: int | None = None
+    plates_high: int | None = None
+    include_baseplate: bool | None = None
+    frame_width: int | None = None
+    frame_color_id: int | None = None
     fit_mode: FitMode | None = None
     part_kinds: tuple[PartKind, ...] | None = None
     color_categories: tuple[ColorCategory, ...] | None = None
@@ -197,14 +224,20 @@ def apply_overrides(config: AppConfig, overrides: MosaicOverrides) -> AppConfig:
     Raises:
         ConfigError: Wenn die resultierende Konfiguration ungültig ist.
     """
-    mosaic, dithering = config.mosaic, config.dithering
+    layout, dithering = config.layout, config.dithering
     run_config = replace(
         config,
+        layout=replace(
+            layout,
+            baseplate_studs=_or_default(overrides.baseplate_studs, layout.baseplate_studs),
+            plates_wide=_or_default(overrides.plates_wide, layout.plates_wide),
+            plates_high=_or_default(overrides.plates_high, layout.plates_high),
+            include_baseplate=_or_default(overrides.include_baseplate, layout.include_baseplate),
+            frame_width=_or_default(overrides.frame_width, layout.frame_width),
+            frame_color_id=_or_default(overrides.frame_color_id, layout.frame_color_id),
+        ),
         mosaic=replace(
-            mosaic,
-            width_studs=_or_default(overrides.width_studs, mosaic.width_studs),
-            height_studs=_or_default(overrides.height_studs, mosaic.height_studs),
-            fit_mode=_or_default(overrides.fit_mode, mosaic.fit_mode),
+            config.mosaic, fit_mode=_or_default(overrides.fit_mode, config.mosaic.fit_mode)
         ),
         palette=replace(
             config.palette,
@@ -247,8 +280,7 @@ def validate_config(config: AppConfig) -> None:
     Raises:
         ConfigError: Bei einem ungültigen Wert.
     """
-    _check_range("Breite", config.mosaic.width_studs, MIN_STUDS, MAX_STUDS, "Noppen")
-    _check_range("Höhe", config.mosaic.height_studs, MIN_STUDS, MAX_STUDS, "Noppen")
+    _check_layout(config.layout)
     _check_range("Dithering-Stärke", config.dithering.strength, 0.0, 1.0)
     _check_positive("Kontrast", config.mosaic.contrast)
     _check_positive("Sättigung", config.mosaic.saturation)
@@ -284,9 +316,33 @@ def _check_positive(label: str, value: float, *, allow_zero: bool = False) -> No
         raise ConfigError(f"{label} muss {relation} sein (angegeben: {value}).")
 
 
+def _check_layout(layout: LayoutConfig) -> None:
+    """Grundplatten-Anzahl, Gesamtgröße und verbleibende Bildfläche."""
+    _check_range("Grundplatten nebeneinander", layout.plates_wide, 1, MAX_PLATES)
+    _check_range("Grundplatten untereinander", layout.plates_high, 1, MAX_PLATES)
+    _check_range("Grundplattengröße", layout.baseplate_studs, 1, MAX_STUDS, "Noppen")
+    _check_positive("Rahmenbreite", layout.frame_width, allow_zero=True)
+    longest = layout.baseplate_studs * max(layout.plates_wide, layout.plates_high)
+    if longest > MAX_STUDS:
+        raise ConfigError(
+            f"Das Mosaik darf höchstens {MAX_STUDS} Noppen pro Seite haben "
+            f"(angegeben: {longest} Noppen)."
+        )
+    shortest = layout.baseplate_studs * min(layout.plates_wide, layout.plates_high)
+    if shortest - 2 * layout.frame_width < MIN_IMAGE_STUDS:
+        raise ConfigError(
+            f"Der Rahmen ist zu breit: Innen müssen mindestens {MIN_IMAGE_STUDS} Noppen "
+            "für das Bild bleiben."
+        )
+
+
 def _check_part_kinds(part_kinds: tuple[PartKind, ...]) -> None:
-    """Mindestens eine Teilart, keine doppelt."""
+    """Mindestens eine Teilart, keine doppelt, keine Grundplatte als Mosaikteil."""
     _check_unique_non_empty("Teilarten", part_kinds)
+    invalid = [kind.value for kind in part_kinds if kind not in MOSAIC_PART_KINDS]
+    if invalid:
+        valid = _join(kind.value for kind in MOSAIC_PART_KINDS)
+        raise ConfigError(f"Ungültige Teilart {_join(invalid)}. Gültig sind: {valid}.")
 
 
 def _check_unique_non_empty(label: str, values: tuple[str, ...]) -> None:
@@ -313,8 +369,21 @@ def parse_part_kinds(text: str) -> tuple[PartKind, ...]:
     Raises:
         ConfigError: Bei unbekannten Namen, mit Liste der gültigen Namen.
     """
-    valid = {kind.value: kind for kind in PartKind}
+    valid = {kind.value: kind for kind in MOSAIC_PART_KINDS}
     return tuple(_lookup(valid, name, "Teilart") for name in parse_names(text))
+
+
+def parse_plates(text: str) -> tuple[int, int]:
+    """Wandelt ``"2x3"`` (Breite × Höhe in Grundplatten) in ``(2, 3)`` um.
+
+    Raises:
+        ConfigError: Wenn das Format nicht „BxH“ mit ganzen Zahlen ist.
+    """
+    # partition teilt am ersten Vorkommen: "2x3" → ("2", "x", "3")
+    wide, separator, high = text.strip().lower().replace("×", "x").partition("x")
+    if not separator or not wide.strip().isdigit() or not high.strip().isdigit():
+        raise ConfigError(f"Grundplatten bitte als „BxH“ angeben, z. B. „2x2“ (angegeben: {text}).")
+    return int(wide), int(high)
 
 
 def parse_color_categories(text: str) -> tuple[ColorCategory, ...]:

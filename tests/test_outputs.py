@@ -10,9 +10,10 @@ import pytest
 from PIL import Image
 
 from lego_mosaik.config import AppConfig
+from lego_mosaik.domain.layout import baseplate_placements
 from lego_mosaik.domain.models import LongAxis, Mosaic, PartCatalog, PartKind, Placement
 from lego_mosaik.domain.palette import build_palette
-from lego_mosaik.outputs.ldraw import baseplate_lines, ldraw_lines, placement_line
+from lego_mosaik.outputs.ldraw import ldraw_lines, placement_line
 from lego_mosaik.registry import OUTPUT_WRITERS
 from lego_mosaik.tiling.greedy import GreedyTiling
 
@@ -32,8 +33,8 @@ def mosaic(catalog: PartCatalog) -> Mosaic:
         grid,
         palette,
         tuple(placements),
-        catalog.element_ids,
-        {"statistik": {"teile": len(placements)}},
+        element_ids=catalog.element_ids,
+        metadata={"statistik": {"teile": len(placements)}},
     )
 
 
@@ -58,7 +59,7 @@ def test_long_axis_z_inverts_rotation(catalog: PartCatalog) -> None:
 
 
 def test_ldraw_header_and_steps(mosaic: Mosaic) -> None:
-    lines = ldraw_lines(mosaic, rows_per_step=4, include_baseplate=False)
+    lines = ldraw_lines(mosaic, rows_per_step=4)
     assert lines[:4] == [
         "0 test",
         "0 Name: mosaik.ldr",
@@ -70,15 +71,26 @@ def test_ldraw_header_and_steps(mosaic: Mosaic) -> None:
 
 
 def test_ldraw_steps_sorted_by_color(mosaic: Mosaic) -> None:
-    lines = ldraw_lines(mosaic, rows_per_step=8, include_baseplate=False)
+    lines = ldraw_lines(mosaic, rows_per_step=8)
     colors = [int(line.split()[1]) for line in lines if line.startswith("1 ")]
     assert colors == sorted(colors)  # ein Schritt → komplett nach Farbe sortiert
 
 
-def test_baseplates_cover_mosaic() -> None:
-    lines = baseplate_lines(48, 40)
-    assert len(lines) == 4  # aufgerundet 2 × 2 Grundplatten
-    assert lines[0] == "1 71 320 8 320 1 0 0 0 1 0 0 0 1 3811.dat"
+def test_baseplates_are_first_step(mosaic: Mosaic, catalog: PartCatalog) -> None:
+    baseplate = dataclasses.replace(
+        catalog.part_types["3020"],
+        part_num="3811",
+        width_studs=32,
+        length_studs=32,
+        ldraw_file="3811.dat",
+    )
+    plates = baseplate_placements(baseplate, catalog.colors[15], plates_wide=2, plates_high=1)
+    lines = ldraw_lines(dataclasses.replace(mosaic, baseplates=plates), rows_per_step=8)
+    assert lines[4:7] == [
+        "1 15 320 8 320 1 0 0 0 1 0 0 0 1 3811.dat",  # Mitte der ersten Platte: 16 · 20 LDU
+        "1 15 960 8 320 1 0 0 0 1 0 0 0 1 3811.dat",  # zweite Platte 32 Noppen weiter rechts
+        "0 STEP",
+    ]
 
 
 def test_all_writers_create_files(mosaic: Mosaic, app_config: AppConfig, tmp_path: Path) -> None:
@@ -105,7 +117,7 @@ def test_parts_lists(mosaic: Mosaic, app_config: AppConfig, tmp_path: Path) -> N
     path = OUTPUT_WRITERS["parts_list_csv"](app_config).write(mosaic, tmp_path)
     assert path.read_bytes().startswith(b"\xef\xbb\xbf")  # UTF-8-BOM für Excel
     with path.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle, delimiter=";"))
     assert sum(int(row["Anzahl"]) for row in rows) == len(mosaic.placements)
     assert all(row["Element-ID"] for row in rows)
     assert [int(row["Farb-ID"]) for row in rows] == sorted(int(row["Farb-ID"]) for row in rows)

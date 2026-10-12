@@ -10,6 +10,7 @@ from lego_mosaik.config import (
     apply_overrides,
     parse_fit_mode,
     parse_part_kinds,
+    parse_plates,
     validate_config,
 )
 from lego_mosaik.domain.errors import ConfigError
@@ -17,24 +18,43 @@ from lego_mosaik.domain.models import FitMode, PartKind
 
 
 def test_overrides_change_only_given_values(app_config: AppConfig) -> None:
-    overrides = MosaicOverrides(width_studs=64, fit_mode=FitMode.PAD, strength=0.0)
+    overrides = MosaicOverrides(plates_wide=2, fit_mode=FitMode.PAD, strength=0.0, frame_width=0)
     run_config = apply_overrides(app_config, overrides)
-    assert run_config.mosaic.width_studs == 64
-    assert run_config.mosaic.height_studs == app_config.mosaic.height_studs
+    assert run_config.layout.plates_wide == 2
+    assert run_config.layout.plates_high == app_config.layout.plates_high
     assert run_config.mosaic.fit_mode is FitMode.PAD
-    # 0.0 ist ein gültiger Wert und darf nicht durch den Standard ersetzt werden
+    # 0 bzw. 0.0 sind gültige Werte und dürfen nicht durch den Standard ersetzt werden
     assert run_config.dithering.strength == 0.0
+    assert run_config.layout.frame_width == 0
     # Das Original bleibt unverändert (frozen + replace)
-    assert app_config.mosaic.width_studs == 8
+    assert app_config.layout.plates_wide == 1
 
 
 def test_empty_overrides_keep_config(app_config: AppConfig) -> None:
     assert apply_overrides(app_config, MosaicOverrides()) == app_config
 
 
-def test_width_out_of_range_has_german_message(app_config: AppConfig) -> None:
-    with pytest.raises(ConfigError, match="Breite muss zwischen 8 und 256 Noppen liegen"):
-        apply_overrides(app_config, MosaicOverrides(width_studs=7))
+def test_too_many_studs_rejected(app_config: AppConfig) -> None:
+    overrides = MosaicOverrides(baseplate_studs=48, plates_wide=6)
+    with pytest.raises(ConfigError, match="höchstens 256 Noppen pro Seite"):
+        apply_overrides(app_config, overrides)
+
+
+def test_frame_too_wide_rejected(app_config: AppConfig) -> None:
+    with pytest.raises(ConfigError, match="Rahmen ist zu breit"):
+        apply_overrides(app_config, MosaicOverrides(frame_width=7))  # 16 − 14 = 2 < 4
+
+
+def test_baseplate_is_no_mosaic_part_kind(app_config: AppConfig) -> None:
+    with pytest.raises(ConfigError, match="Ungültige Teilart baseplate"):
+        apply_overrides(app_config, MosaicOverrides(part_kinds=(PartKind.BASEPLATE,)))
+
+
+def test_parse_plates() -> None:
+    assert parse_plates("2x3") == (2, 3)
+    assert parse_plates(" 1 × 1 ") == (1, 1)
+    with pytest.raises(ConfigError, match="BxH"):
+        parse_plates("zwei")
 
 
 def test_strength_out_of_range(app_config: AppConfig) -> None:

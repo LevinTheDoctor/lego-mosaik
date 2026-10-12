@@ -27,6 +27,7 @@ import pytest
 from lego_mosaik.config import (
     AppConfig,
     DitheringConfig,
+    LayoutConfig,
     MosaicConfig,
     PaletteConfig,
     SourceConfig,
@@ -53,6 +54,7 @@ PART_ROWS: tuple[tuple[str, str, PartKind, int, int, int], ...] = (
     ("3020", "Plate 2 x 4", PartKind.PLATE, 2, 4, 8),
     ("3070b", "Tile 1 x 1 with Groove", PartKind.TILE, 1, 1, 8),
     ("3005", "Brick 1 x 1", PartKind.BRICK, 1, 1, 24),
+    ("3867", "Baseplate 16 x 16", PartKind.BASEPLATE, 16, 16, 4),
 )
 
 # (part_num, color_id) – welche Kombinationen es gibt
@@ -73,6 +75,7 @@ AVAILABLE: tuple[tuple[str, int], ...] = (
     ("3070b", 15),
     ("3005", 15),
     ("3024", 36),
+    ("3867", 15),
 )
 
 
@@ -186,7 +189,8 @@ def catalog() -> PartCatalog:
 def app_config(tmp_path: Path) -> AppConfig:
     """Kleine, schnelle Konfiguration mit Ausgabeordner im Temp-Verzeichnis."""
     return AppConfig(
-        mosaic=MosaicConfig(width_studs=8, height_studs=8),
+        layout=LayoutConfig(baseplate_studs=16, frame_width=1),
+        mosaic=MosaicConfig(),
         palette=PaletteConfig(part_kinds=(PartKind.PLATE, PartKind.TILE)),
         dithering=DitheringConfig(method="floyd_steinberg"),
         tiling=TilingConfig(strategy="greedy"),

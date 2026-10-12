@@ -35,6 +35,11 @@ class PartKind(StrEnum):
     PLATE = "plate"
     TILE = "tile"
     BRICK = "brick"
+    BASEPLATE = "baseplate"  # nur als Untergrund, nie als Mosaikpixel
+
+
+# Teilarten, aus denen das Mosaik selbst bestehen darf
+MOSAIC_PART_KINDS = (PartKind.PLATE, PartKind.TILE, PartKind.BRICK)
 
 
 class LongAxis(StrEnum):
@@ -127,6 +132,7 @@ class PartType:
         ldraw_file: Dateiname in der LDraw-Bibliothek, z. B. "3024.dat".
         height_ldu: Höhe in LDU (Plate/Tile 8, Brick 24).
         ldraw_long_axis: Achse der langen Seite in der LDraw-Datei.
+        bricklink_id: Teilenummer bei BrickLink, falls abweichend (z. B. 3070 statt 3070b).
     """
 
     part_num: str
@@ -137,6 +143,12 @@ class PartType:
     ldraw_file: str
     height_ldu: int
     ldraw_long_axis: LongAxis = LongAxis.X
+    bricklink_id: str | None = None
+
+    @property
+    def bricklink_item(self) -> str:
+        """Teilenummer für BrickLink (fällt auf die Rebrickable-Nummer zurück)."""
+        return self.bricklink_id or self.part_num
 
     @property
     def is_single_stud(self) -> bool:
@@ -241,7 +253,8 @@ class Mosaic:
         height: Höhe in Noppen.
         color_grid: H×W-Raster mit Indizes in ``palette``.
         palette: Die beim Dithering verwendeten Farben.
-        placements: Alle platzierten Teile.
+        placements: Alle platzierten Teile des Mosaiks (eine Lage, inklusive Rahmen).
+        baseplates: Grundplatten unter dem Mosaik (leer, wenn ohne Grundplatte).
         element_ids: LEGO-Element-IDs der genutzten (Teilenummer, Farb-ID)-Kombinationen.
         metadata: Zusatzinfos für Ausgaben (z. B. Konfiguration und Statistik als JSON-fähige
             Werte). Die Domain kennt deren Aufbau nicht, sie reicht sie nur durch.
@@ -253,8 +266,14 @@ class Mosaic:
     color_grid: IndexGrid
     palette: tuple[LegoColor, ...]
     placements: tuple[Placement, ...]
+    baseplates: tuple[Placement, ...] = ()
     element_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def all_parts(self) -> tuple[Placement, ...]:
+        """Grundplatten und Mosaikteile zusammen (z. B. für Teilelisten)."""
+        return self.baseplates + self.placements
 
     def color_at(self, row: int, col: int) -> LegoColor:
         """Farbe der Zelle (Zeile, Spalte)."""

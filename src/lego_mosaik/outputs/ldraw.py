@@ -21,11 +21,9 @@ LAYER_Y = 0  # alle Teile in einer Lage
 # Rotationsmatrizen (zeilenweise a b c d e f g h i)
 IDENTITY = (1, 0, 0, 0, 1, 0, 0, 0, 1)
 ROTATE_Y_90 = (0, 0, 1, 0, 1, 0, -1, 0, 0)  # 90° um die y-Achse: x → z
-
-# Grundplatte (nur mit include_baseplate): Rebrickable/LDraw 3811 = "Baseplate 32 x 32"
-BASEPLATE_FILE = "3811.dat"
-BASEPLATE_STUDS = 32
-BASEPLATE_COLOR_CODE = 71  # Light Bluish Gray
+# Grundplatten liegen unter der Mosaiklage: Ihre Oberkante (Ursprung der LDraw-Datei)
+# trifft die Unterkante der Plates, also eine Plate-Höhe tiefer (+y = nach unten)
+BASEPLATE_Y = PLATE_HEIGHT_LDU
 
 
 class LdrawWriter:
@@ -33,18 +31,16 @@ class LdrawWriter:
 
     Args:
         rows_per_step: Nach so vielen Zeilen beginnt ein neuer Bauschritt.
-        include_baseplate: Grundplatte(n) 32 × 32 unter das Mosaik legen.
     """
 
     name = "ldraw"
 
-    def __init__(self, *, rows_per_step: int, include_baseplate: bool) -> None:
+    def __init__(self, *, rows_per_step: int) -> None:
         self._rows_per_step = rows_per_step
-        self._include_baseplate = include_baseplate
 
     def write(self, mosaic: Mosaic, target_dir: Path) -> Path:
         """Erzeugt die Zeilen und schreibt sie mit Windows-freundlichen Zeilenenden."""
-        lines = ldraw_lines(mosaic, self._rows_per_step, include_baseplate=self._include_baseplate)
+        lines = ldraw_lines(mosaic, self._rows_per_step)
         path = target_dir / FILE_NAME
         # LDraw-Dateien sind ASCII/UTF-8; CRLF ("\r\n") ist der übliche Zeilenumbruch
         path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
@@ -52,11 +48,11 @@ class LdrawWriter:
         return path
 
 
-def ldraw_lines(mosaic: Mosaic, rows_per_step: int, *, include_baseplate: bool) -> list[str]:
-    """Alle Zeilen der LDraw-Datei: Kopf, optional Grundplatte, Teile in Bauschritten."""
+def ldraw_lines(mosaic: Mosaic, rows_per_step: int) -> list[str]:
+    """Alle Zeilen der LDraw-Datei: Kopf, Grundplatten (erster Schritt), Teile in Bauschritten."""
     lines = header_lines(mosaic.title)
-    if include_baseplate:
-        lines += baseplate_lines(mosaic.width, mosaic.height)
+    if mosaic.baseplates:
+        lines += [placement_line(plate, y=BASEPLATE_Y) for plate in mosaic.baseplates]
         lines.append("0 STEP")
     for _, step in group_steps(mosaic.placements, rows_per_step):
         lines += [placement_line(placement) for placement in step]
@@ -96,14 +92,14 @@ def group_steps(
     ]
 
 
-def placement_line(placement: Placement) -> str:
+def placement_line(placement: Placement, *, y: float = LAYER_Y) -> str:
     """Zeile Typ 1: ``1 <farbe> <x> <y> <z> <a b c d e f g h i> <datei>``."""
     # Mittelpunkt des Teils: linke Kante + halbe Ausdehnung, in LDU umgerechnet
     x = (placement.col + placement.cols_spanned / 2) * LDU_PER_STUD
     z = (placement.row + placement.rows_spanned / 2) * LDU_PER_STUD
     matrix = rotation_matrix(placement)
     color_code = ldraw_color_code(placement.color)
-    return _type1_line(color_code, (x, LAYER_Y, z), matrix, placement.part.ldraw_file)
+    return _type1_line(color_code, (x, y, z), matrix, placement.part.ldraw_file)
 
 
 def ldraw_color_code(color: LegoColor) -> int:
@@ -125,28 +121,6 @@ def rotation_matrix(placement: Placement) -> tuple[int, ...]:
     """
     desired = LongAxis.Z if placement.rotated else LongAxis.X
     return IDENTITY if placement.part.ldraw_long_axis is desired else ROTATE_Y_90
-
-
-def baseplate_lines(width: int, height: int) -> list[str]:
-    """Grundplatten 32 × 32 lückenlos unter dem Mosaik (ragen ggf. über den Rand)."""
-    half = BASEPLATE_STUDS / 2
-    # -(-a // b) rundet die Division auf: 48 Noppen brauchen 2 Grundplatten
-    columns, rows = -(-width // BASEPLATE_STUDS), -(-height // BASEPLATE_STUDS)
-    return [
-        # y = Plate-Höhe: Die Oberkante der Grundplatte liegt an der Unterkante der Mosaikteile
-        _type1_line(
-            BASEPLATE_COLOR_CODE,
-            (
-                (bx * BASEPLATE_STUDS + half) * LDU_PER_STUD,
-                PLATE_HEIGHT_LDU,
-                (bz * BASEPLATE_STUDS + half) * LDU_PER_STUD,
-            ),
-            IDENTITY,
-            BASEPLATE_FILE,
-        )
-        for bz in range(rows)
-        for bx in range(columns)
-    ]
 
 
 def _type1_line(

@@ -38,7 +38,7 @@ def build_result(mosaic: Mosaic) -> dict[str, object]:
     studs_per_color = Counter[int]()
     for placement in mosaic.placements:
         studs_per_color[placement.color.id] += placement.part.area
-    parts_list = PartsList.from_placements(mosaic.placements)
+    parts_list = PartsList.from_placements(mosaic.all_parts)
     return {
         "titel": mosaic.title,
         "breite": mosaic.width,

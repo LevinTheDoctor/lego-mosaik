@@ -80,10 +80,7 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
     "preview_png": lambda config: PreviewPngWriter(
         stud_px=config.preview.stud_px, draw_part_edges=config.preview.draw_part_edges
     ),
-    "ldraw": lambda config: LdrawWriter(
-        rows_per_step=config.ldraw.rows_per_step,
-        include_baseplate=config.ldraw.include_baseplate,
-    ),
+    "ldraw": lambda config: LdrawWriter(rows_per_step=config.ldraw.rows_per_step),
     "parts_list_csv": lambda config: PartsListCsvWriter(),
     "result_json": lambda config: ResultJsonWriter(),
 }

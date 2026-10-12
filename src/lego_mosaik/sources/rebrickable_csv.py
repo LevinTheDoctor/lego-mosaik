@@ -59,6 +59,7 @@ class _Geometry:
     ldraw_file: str
     height_ldu: int
     ldraw_long_axis: LongAxis
+    bricklink_id: str | None
 
 
 class RebrickableCsvSource:
@@ -154,6 +155,7 @@ def _to_part_type(part_num: str, name: str, row: _Geometry) -> PartType:
         ldraw_file=row.ldraw_file,
         height_ldu=row.height_ldu,
         ldraw_long_axis=row.ldraw_long_axis,
+        bricklink_id=row.bricklink_id,
     )
 
 
@@ -179,6 +181,8 @@ def _parse_geometry_row(row: dict[str, str]) -> tuple[str, _Geometry]:
         ldraw_file=row["ldraw_file"].strip(),
         height_ldu=int(row["height_ldu"]),
         ldraw_long_axis=LongAxis((row.get("ldraw_long_axis") or "x").strip().lower()),
+        # optionale Spalte; leer oder fehlend → None (dann gilt die Rebrickable-Nummer)
+        bricklink_id=(row.get("bricklink_id") or "").strip() or None,
     )
     return row["part_num"].strip(), geometry
 
