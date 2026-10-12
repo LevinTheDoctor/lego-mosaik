@@ -59,7 +59,7 @@ def test_long_axis_z_inverts_rotation(catalog: PartCatalog) -> None:
 
 
 def test_ldraw_header_and_steps(mosaic: Mosaic) -> None:
-    lines = ldraw_lines(mosaic, rows_per_step=4)
+    lines = ldraw_lines(mosaic, rows_per_step=4, section_studs=16)
     assert lines[:4] == [
         "0 test",
         "0 Name: mosaik.ldr",
@@ -71,7 +71,7 @@ def test_ldraw_header_and_steps(mosaic: Mosaic) -> None:
 
 
 def test_ldraw_steps_sorted_by_color(mosaic: Mosaic) -> None:
-    lines = ldraw_lines(mosaic, rows_per_step=8)
+    lines = ldraw_lines(mosaic, rows_per_step=8, section_studs=16)
     colors = [int(line.split()[1]) for line in lines if line.startswith("1 ")]
     assert colors == sorted(colors)  # ein Schritt → komplett nach Farbe sortiert
 
@@ -85,8 +85,9 @@ def test_baseplates_are_first_step(mosaic: Mosaic, catalog: PartCatalog) -> None
         ldraw_file="3811.dat",
     )
     plates = baseplate_placements(baseplate, catalog.colors[15], plates_wide=2, plates_high=1)
-    lines = ldraw_lines(dataclasses.replace(mosaic, baseplates=plates), rows_per_step=8)
-    assert lines[4:7] == [
+    lines = ldraw_lines(dataclasses.replace(mosaic, baseplates=plates), 8, 16)
+    assert lines[4:8] == [
+        "0 // Grundplatten",
         "1 15 320 8 320 1 0 0 0 1 0 0 0 1 3811.dat",  # Mitte der ersten Platte: 16 · 20 LDU
         "1 15 960 8 320 1 0 0 0 1 0 0 0 1 3811.dat",  # zweite Platte 32 Noppen weiter rechts
         "0 STEP",
@@ -134,3 +135,14 @@ def test_result_json(mosaic: Mosaic, app_config: AppConfig, tmp_path: Path) -> N
     assert result["anzahl_teile"] == len(mosaic.placements)
     assert sum(color["noppen"] for color in result["palette"]) == 64
     assert [color["name"] for color in result["palette"]] == ["Black", "Red", "White"]
+
+
+def test_steps_follow_sections(catalog: PartCatalog) -> None:
+    palette = build_palette(catalog, (PartKind.PLATE,))
+    grid = np.zeros((4, 32), dtype=np.intp)  # zwei Abschnitte à 16 nebeneinander
+    placements = tuple(GreedyTiling((PartKind.PLATE,), 8).tile(grid, palette, catalog))
+    mosaic = Mosaic("test", 32, 4, grid, palette, placements)
+    lines = ldraw_lines(mosaic, rows_per_step=2, section_studs=16)
+    comments = [line for line in lines if line.startswith("0 //")]
+    assert comments == ["0 // Abschnitt 1", "0 // Abschnitt 2"]
+    assert lines.count("0 STEP") == 4  # je Abschnitt 2 Zeilenblöcke à 2 Zeilen

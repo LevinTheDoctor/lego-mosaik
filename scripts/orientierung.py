@@ -75,8 +75,8 @@ def main() -> None:
     baseplate_dir = TARGET_DIR / "mit_grundplatte"
     baseplate_dir.mkdir(parents=True, exist_ok=True)
     mosaic = without_baseplate
-    LdrawWriter(rows_per_step=2).write(without_baseplate, TARGET_DIR)
-    LdrawWriter(rows_per_step=2).write(with_baseplate, baseplate_dir)
+    LdrawWriter(rows_per_step=2, section_studs=WIDTH).write(without_baseplate, TARGET_DIR)
+    LdrawWriter(rows_per_step=2, section_studs=WIDTH).write(with_baseplate, baseplate_dir)
     PreviewPngWriter(stud_px=32, draw_part_edges=True).write(mosaic, TARGET_DIR)
     print(f"Prüfdateien geschrieben nach {TARGET_DIR.resolve()}")
 

@@ -27,6 +27,7 @@ lazy from lego_mosaik.dithering.nearest import NearestColorDitherer
 lazy from lego_mosaik.dithering.ordered import OrderedDitherer
 lazy from lego_mosaik.dithering.protocol import Ditherer
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
+lazy from lego_mosaik.outputs.instructions_png import InstructionsWriter, PageLayout
 lazy from lego_mosaik.outputs.ldraw import LdrawWriter
 lazy from lego_mosaik.outputs.official_parts_lists import OfficialPartsListsWriter
 lazy from lego_mosaik.outputs.parts_list_csv import PartsListCsvWriter
@@ -81,9 +82,22 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
     "preview_png": lambda config: PreviewPngWriter(
         stud_px=config.preview.stud_px, draw_part_edges=config.preview.draw_part_edges
     ),
-    "ldraw": lambda config: LdrawWriter(rows_per_step=config.ldraw.rows_per_step),
+    "ldraw": lambda config: LdrawWriter(
+        rows_per_step=config.ldraw.rows_per_step,
+        section_studs=config.instructions.section_studs,
+    ),
     "parts_list_csv": lambda config: PartsListCsvWriter(),
     "official_parts_lists": lambda config: OfficialPartsListsWriter(),
+    "instructions_png": lambda config: InstructionsWriter(
+        PageLayout(
+            width=config.instructions.page_width_px,
+            height=config.instructions.page_height_px,
+            margin=config.instructions.margin_px,
+            max_stud_px=config.instructions.max_stud_px,
+            section_studs=config.instructions.section_studs,
+            font_paths=config.instructions.font_paths,
+        )
+    ),
     "result_json": lambda config: ResultJsonWriter(),
 }
 

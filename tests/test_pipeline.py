@@ -90,3 +90,14 @@ def test_safe_name() -> None:
     assert safe_name("Katze & Hund") == "Katze_Hund"
     assert safe_name("../../etc") == "etc"
     assert safe_name("äöü") == "mosaik"
+
+
+def test_no_part_crosses_a_section(pipeline_config: AppConfig, image_file: Path) -> None:
+    config = dataclasses.replace(
+        pipeline_config,
+        instructions=dataclasses.replace(pipeline_config.instructions, section_studs=8),
+    )
+    mosaic = make_pipeline(config).run(image_file).mosaic
+    for placement in mosaic.placements:
+        cells = list(placement.cells())
+        assert len({(row // 8, col // 8) for row, col in cells}) == 1

@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +37,7 @@ from lego_mosaik.domain.models import (
     TilingStats,
 )
 from lego_mosaik.domain.palette import build_palette, most_used_colors
+from lego_mosaik.domain.sections import split_sections
 lazy from lego_mosaik.dithering.protocol import ColorSpace, Ditherer
 lazy from lego_mosaik.imaging.protocol import ImagePreparer, RgbImage
 lazy from lego_mosaik.outputs.protocol import OutputWriter
@@ -206,7 +207,9 @@ class MosaicPipeline:
                 grid, palette, run_config.layout.frame_width, layout.frame_color
             )
         with timer.step("Zerlegung in Teile"):
-            placements = tuple(components.tiler.tile(grid, palette, catalog))
+            section = run_config.instructions.section_studs
+            size = section if run_config.tiling.split_sections else max(grid.shape)
+            placements = _tile_sections(components.tiler, grid, palette, catalog, size)
         stats = _stats(layout.size, placements, timer.durations)
         mosaic = Mosaic(
             title=title,
@@ -302,6 +305,31 @@ def _dither(
         logger.info("Palette auf die %d häufigsten Farben begrenzt.", len(palette))
         grid = dither_with(palette)
     return grid, palette
+
+
+def _tile_sections(
+    tiler: TilingStrategy,
+    grid: IndexGrid,
+    palette: tuple[LegoColor, ...],
+    catalog: PartCatalog,
+    section_studs: int,
+) -> tuple[Placement, ...]:
+    """Zerlegt jeden Abschnitt einzeln und verschiebt die Teile an ihre echte Position.
+
+    Funktioniert mit jeder Zerlegungsstrategie, weil jede nur ein (kleineres) Raster sieht.
+    """
+    height, width = grid.shape
+    placements: list[Placement] = []
+    for section in split_sections(width, height, section_studs):
+        # Slicing schneidet den Abschnitt aus; die Strategie sieht nur dieses Teilraster
+        sub_grid = grid[
+            section.row : section.row + section.rows, section.col : section.col + section.cols
+        ]
+        placements += [
+            replace(p, row=p.row + section.row, col=p.col + section.col)
+            for p in tiler.tile(sub_grid, palette, catalog)
+        ]
+    return tuple(placements)
 
 
 def _stats(

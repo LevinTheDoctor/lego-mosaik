@@ -75,17 +75,18 @@ CONFIG = AppConfig(
         bayer_size=4,  # nur "ordered": 2, 4 oder 8
         spread=32.0,  # nur "ordered": Stärke in RGB-Stufen
     ),
-    tiling=TilingConfig(strategy="greedy", max_part_length=8),
+    tiling=TilingConfig(strategy="greedy", max_part_length=8, split_sections=True),
     outputs=(
         "preview_png",
         "ldraw",
         "parts_list_csv",
         "official_parts_lists",
+        "instructions_png",
         "result_json",
     ),
     preview=PreviewConfig(stud_px=16, draw_part_edges=True),
     ldraw=LdrawConfig(rows_per_step=4),
-    instructions=InstructionsConfig(section_studs=16, stud_px=32),
+    instructions=InstructionsConfig(section_studs=16, max_stud_px=48),  # 16 × 16 wie LEGO Art
     source=SourceConfig(data_dir=Path("daten/rebrickable"), max_age_days=7, auto_update=True),
     output_dir=Path("ausgabe"),
     server=ServerConfig(host="127.0.0.1", port=8000, max_upload_mb=20, update_interval_hours=24),

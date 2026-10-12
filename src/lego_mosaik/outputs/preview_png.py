@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from lego_mosaik.domain.models import Mosaic
-from lego_mosaik.outputs.rendering import render_placements
+from lego_mosaik.outputs.rendering import Region, render_placements
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,7 @@ class PreviewPngWriter:
         """Zeichnet das Mosaik und speichert es als PNG."""
         image = render_placements(
             mosaic.placements,
-            width=mosaic.width,
-            height=mosaic.height,
+            region=Region(0, 0, mosaic.height, mosaic.width),
             stud_px=self._stud_px,
             draw_part_edges=self._draw_part_edges,
         )

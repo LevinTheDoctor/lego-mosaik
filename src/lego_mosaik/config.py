@@ -121,6 +121,9 @@ class TilingConfig:
 
     strategy: str  # Schlüssel aus der Registry
     max_part_length: int = 8
+    # Jeden Bauabschnitt (siehe InstructionsConfig.section_studs) getrennt zerlegen:
+    # Kein Teil ragt dann in einen anderen Abschnitt, jede Anleitungsseite ist für sich baubar
+    split_sections: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +143,22 @@ class LdrawConfig:
 
 @dataclass(frozen=True, slots=True)
 class InstructionsConfig:
-    """Aufbau der Bauanleitung."""
+    """Aufbau der Bauanleitung (Seitengröße entspricht A4 bei 150 dpi)."""
 
     section_studs: int = 16  # Abschnittsgröße in Noppen (quadratisch)
-    stud_px: int = 32  # Kantenlänge einer Noppe auf den Abschnittsseiten
+    page_width_px: int = 1240
+    page_height_px: int = 1754
+    margin_px: int = 60
+    max_stud_px: int = 48  # größte Noppe auf den Abschnittsseiten
+    # TrueType-Schriften mit Umlauten; die erste vorhandene wird genutzt.
+    # Pillows eingebaute Schrift kann weder ä/ö/ü noch × und –.
+    font_paths: tuple[Path, ...] = (
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),  # macOS
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),  # Debian/Ubuntu
+        Path("/usr/share/fonts/TTF/DejaVuSans.ttf"),  # Arch
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        Path("C:/Windows/Fonts/arial.ttf"),  # Windows
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +312,7 @@ def validate_config(config: AppConfig) -> None:
     _check_range("Zeilen pro Bauschritt", config.ldraw.rows_per_step, 1, MAX_STUDS)
     _check_range("Noppengröße der Vorschau", config.preview.stud_px, 1, MAX_STUDS)
     _check_range("Abschnittsgröße der Anleitung", config.instructions.section_studs, 1, MAX_STUDS)
+    _check_range("Noppengröße der Anleitung", config.instructions.max_stud_px, 4, MAX_STUDS)
     _check_range("Port", config.server.port, MIN_PORT, MAX_PORT)
     _check_range("Upload-Grenze", config.server.max_upload_mb, 1, 1024, "MB")
 
