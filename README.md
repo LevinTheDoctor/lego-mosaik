@@ -79,6 +79,7 @@ Optionen von `erstellen` (in der Hilfe nach Gruppen sortiert):
 | `--relief-hoehe 2` | Höchste Relief-Stufe in Plates (1–3) |
 | **Verfahren und Ausgaben** | |
 | `--dithering atkinson` / `--staerke 0.8` | Verfahren und Stärke |
+| `--aufraeumen` | Einzelne Pixel durch die Nachbarfarbe ersetzen (Comics und Logos; zusammen mit `--staerke 0` am ruhigsten) |
 | `--farbabstand cie76\|ciede2000` | Formel für den Farbabstand (schnell bzw. genau) |
 | `--zerlegung greedy` | Zerlegungsverfahren |
 | `--ausgaben preview_png,ldraw` | Nur bestimmte Ausgaben |
@@ -95,6 +96,7 @@ uv run lego-mosaik erstellen katze.jpg --format quadrat --stil punkte   # Look w
 uv run lego-mosaik erstellen katze.jpg --breite 64            # Höhe aus dem Seitenverhältnis
 uv run lego-mosaik erstellen katze.jpg --unterbau grundplatte --plattengroesse 48 --platten 1x1
 uv run lego-mosaik erstellen katze.jpg --exotische-farben --dithering atkinson
+uv run lego-mosaik erstellen comic.png --staerke 0 --aufraeumen   # klare Flächen, wenig 1×1
 uv run lego-mosaik interaktiv katze.jpg
 uv run lego-mosaik farben --teile tile --farbkategorien solid,pearl
 uv run lego-mosaik teile-aktualisieren --erzwingen
@@ -127,19 +129,29 @@ Alle Standardwerte stehen **an einer Stelle**: `CONFIG` in `src/lego_mosaik/main
 | --- | --- |
 | `layout` | Unterbau LEGO-Art-Paneele (16 × 16), 3 × 3 Platten = 48 × 48 Noppen, freie Größe aus, 2 Pins pro Naht |
 | `frame` | 1 Noppe Schwarz, Ecken wie Rahmen, nur Tiles, eine Plate erhöht |
-| `palette` | Teilarten Plate + Tile, Kategorie `solid`, `include_color_ids`, `exclude_color_ids`, `max_colors` |
+| `palette` | Teilarten Plate + Tile, Kategorie `solid`, `include_color_ids`, `exclude_color_ids`, `max_colors`, seltene Farben zusammenlegen (`min_color_share` 0,2 %) |
 | `shapes` | Stil `formen`, erlaubte Formteile (inklusive Wedges), 6 Teilpixel pro Noppe, Mindestgewinn 20 % und ΔE 3, Unterlagen erlaubt |
 | `relief` | aus; Stufen 1, Farbe der Stützlagen wie der Unterbau |
-| `dithering` | `floyd_steinberg`, Stärke 1.0, CIEDE2000, Serpentine |
+| `dithering` | `floyd_steinberg`, Stärke 1.0, CIEDE2000, Serpentine, Aufräumen aus (`despeckle`) |
 | `tiling` | `greedy`, längste Teilseite 8, Zerlegung pro Abschnitt |
 | `outputs` | `preview_png`, `ldraw`, `parts_list_csv`, `official_parts_lists`, `instructions_png`, `result_json` |
-| `instructions` | Abschnitte 16 × 16, A4 quer, Kamera (60° Höhe, 0° Drehung), Größe der Schrittansicht, Schriften (normal und fett) |
-| `source` | Rebrickable-URL, Höchstalter 7 Tage, automatische Aktualisierung, Pfad zur Studio-Farbtabelle |
+| `instructions` | Abschnitte 16 × 16, A4 quer, Kamera der 3D-Bilder (60° Höhe, 0° Drehung), Bauschritte senkrecht von oben, Größe der Schrittansicht, Schriften (normal und fett) |
+| `source` | Rebrickable-URL, Höchstalter 7 Tage, automatische Aktualisierung, nur aktuelle Teile (`recent_years` 3), Pfad zur Studio-Farbtabelle |
 | `server` | `127.0.0.1:8000`, Upload bis 20 MB, Katalogprüfung alle 24 h |
 
 **Exotische Farben:**
 - `color_categories` legt fest, welche Oberflächen erlaubt sind: `solid`, `transparent`, `metallic`, `pearl`, `chrome`, `glitter`, `speckle`, `satin`, `milky`, `rubber`.
 - Einzelne Farben lassen sich mit `include_color_ids` trotzdem erlauben oder mit `exclude_color_ids` sperren.
+
+**Nur aktuelle Farben (`source.recent_years`):**
+- `elements.csv` enthält auch Elemente, die es seit Jahren nicht mehr gibt, z. B. das alte Grau und Dunkelgrau (2004 durch Medium und Dark Stone Grey ersetzt), Earth Orange oder Light Reddish Violet. Sonst landen beide Grau-Generationen im selben Bild.
+- Deshalb gilt eine (Teil, Farbe)-Kombination nur, wenn sie in einem Set der letzten 3 Jahre vorkommt. Das ergibt sich aus `sets.csv` (Jahr), `inventories.csv` und `inventory_parts.csv` von Rebrickable (zusammen ca. 15 MB, werden mit aktualisiert, Einlesen ca. 1,5 s).
+- Teile, die in keinem dieser Sets vorkommen (Rebrickable führt z. B. Paneele und Pins dort unter anderer Nummer), behalten alle Farben, die nicht ausgelaufen sind. Fehlen die Inventare (offline), wird nur das letzte Jahr der Farbe (`y2` in `colors.csv`) geprüft.
+- `recent_years=None` erlaubt wieder alle historischen Kombinationen.
+
+**Farben zusammenlegen und Aufräumen:**
+- `min_color_share`: Farben, die nach dem Dithering auf weniger als 0,2 % der Bildfläche liegen (bei 46 × 46 also auf höchstens 4 Noppen), fallen weg; das Bild wird ohne sie neu gedithert. So verschwinden Farben, die nur für ein einziges Teil gekauft werden müssten.
+- `despeckle` (`--aufraeumen`): Pixel ohne gleichfarbigen Nachbarn (auch diagonal) bekommen die häufigste Nachbarfarbe. Einnoppige Linien wie ein schwarzer Umriss bleiben erhalten. Für Comics mit klaren Flächen ist `--staerke 0 --aufraeumen` am ruhigsten; bei Fotos lieber aus lassen.
 
 **Größe:**
 - Entweder ein Format, Platten × Plattengröße oder frei in Noppen (`width_studs`, `height_studs`), jeweils 8 bis 384 Noppen pro Seite.
@@ -158,7 +170,7 @@ Alle Standardwerte stehen **an einer Stelle**: `CONFIG` in `src/lego_mosaik/main
 **Relief (`relief`):**
 - `motiv`: Der Hintergrund (häufigste Randfarbe, soweit vom Rand aus zusammenhängend) bleibt flach, alles andere liegt `levels` Plates höher.
 - `hell` / `dunkel`: Helle bzw. dunkle Farben liegen höher, in `levels` + 1 gleich großen Stufen.
-- Unter erhöhten Teilen liegen Stützlagen aus Plates (Standard: Farbe des Unterbaus). Ein Bildteil reicht nie über eine Stufe; 2 × 2-Formteile liegen nur auf gleich hohen Noppen.
+- Unter erhöhten Teilen liegen Stützen in der Farbe des Unterbaus: Wo drei Plates übereinander kämen, steht ein Brick (so hoch wie drei Plates). Das spart zwei Drittel der Stützteile und Bauschritte; der Rest wird mit Plates aufgefüllt. Ein Bildteil reicht nie über eine Stufe; 2 × 2-Formteile liegen nur auf gleich hohen Noppen.
 
 **Unterbau (`substrate`):**
 - `ART_PANEL` (Standard): LEGO-Art-Paneele „Brick 16 x 16 x 1 1/3 with Pin Holes“ (65803). Sie haben Technic-Löcher an den Seiten; an jeder Naht stecken `pins_per_seam` Technic-Pins (2780). So hält das ganze Bild zusammen.
@@ -186,25 +198,29 @@ Jeder Lauf schreibt in einen eigenen Ordner, z. B. `ausgabe/2026-10-12_143005_ka
 | `instructions_png` | `anleitung_01.png` …, `anleitung.pdf` | Bauanleitung im LEGO-Stil mit 3D-Renderbildern (siehe unten) |
 | `result_json` | `ergebnis.json` | Konfiguration, Statistik, Palette, Dateiliste |
 
+**Kennzahlen in `ergebnis.json` (`statistik`)** zum Vergleichen von Läufen: `teile`, `farben` (dieselbe Zahl wie Titelblatt und Teileliste), `altfarben` (Farben, die zuletzt vor dem Zeitraum `recent_years` in einem Set vorkamen; sollte 0 sein), `anteil_1x1`, `seiten` der Anleitung, außerdem Formteile, Relief-Teile, Unterlagen, Stützteile und die Dauer pro Schritt.
+
+Alle Teilelisten sind nach Farbfamilien sortiert (Grautöne von Weiß bis Schwarz, dann Rot, Gelb, Grün, Blau, Violett, Pink), innerhalb einer Farbe nach Teilart und Größe.
+
 ## Bauanleitung
 
 `anleitung.pdf` sieht aus wie ein LEGO-Heft und entsteht vollautomatisch ohne externe Programme. Gerendert wird mit einem eigenen kleinen 3D-Renderer auf Basis von Pillow (`outputs/iso_render.py`). Seiten im Querformat (A4 quer), gebaut wird erst die stabile Grundlage, dann das Bild.
 
-1. **Titelblatt:** dunkler Hintergrund mit gelbem Band, der Name des Mosaiks groß (`--titel`, im interaktiven Modus unter „Name und Ausgaben“), das fertige Mosaik in 3D, Teilezahl, Größe in Noppen und Zentimetern, Farben
-2. **So wird gebaut:** Ablauf in Worten und die Karte der Abschnitte
+1. **Titelblatt:** dunkler Hintergrund mit gelbem Band, der Name des Mosaiks groß (`--titel`, im interaktiven Modus unter „Name und Ausgaben“), das fertige Mosaik in 3D, Teilezahl, Größe in Noppen (mit Rahmen zusätzlich die Bildfläche, z. B. „48 × 48 Noppen (Bild 46 × 46)“) und Zentimetern, Farben (wie in der Teileliste)
+2. **So wird gebaut:** Ablauf mit den echten Schrittnummern („Schritte 3–4: Rahmen bauen“), Karte der Abschnitte, Legende der Zeichen und alle Farbkürzel mit Farbfeld und Namen
 3. **Grundlage:** Unterbau auslegen, Paneele mit Pins verbinden (Verbindungsplan) bzw. große Platten mit der Verbindungslage, dann Rahmen-Unterbau und Rahmen
 4. **Pro Abschnitt** (16 × 16, also genau ein Paneel), jeder Schritt auf eigener Seite:
-   - oben links die große Schrittnummer, darunter klein „Abschnitt 3/9 · Zeilen 1–4“
-   - daneben der hellblaue Teile-Kasten mit „3x“ unter jedem Teilbild
+   - oben links die große Schrittnummer, darunter klein „Abschnitt 3/9 · Teil 2 von 4“ (bewusst ohne Zeilenangabe: lange Teile reichen über ihren Block hinaus)
+   - daneben der hellblaue Teile-Kasten mit „3x“ und Farbkürzel unter jedem Teilbild, nach Farbfamilie und Größe sortiert
    - im ersten Schritt eines Abschnitts oben rechts die Fortschrittskarte: gebaut farbig, offen grau, aktueller Abschnitt rot umrandet
-   - darunter die 3D-Ansicht; neue Teile orange umrandet, Formteile mit Umriss und Drehung
-   - Relief-Lagen und Unterlagen der Formteile kommen in jedem Abschnitt zuerst
-5. **Fertig:** das ganze Mosaik und was es zusammenhält
-6. **Teileliste** wie hinten in LEGO-Heften: jedes Teil mit Stückzahl, LEGO-Farbname und Element-ID (ohne bekannte Element-ID die BrickLink-Nummer)
+   - darunter die Ansicht **senkrecht von oben** mit Zeilen- und Spaltennummern am Rand; neue Teile orange umrandet und mit Farbkürzel beschriftet, Formteile mit Umriss und Drehung, der Unterbau hell (sonst wären schwarze Teile auf schwarzen Paneelen kaum zu sehen)
+   - zuerst die Relief-Lagen („Relief, Lage 1“), dann die Unterlagen der Formteile als eigener Schritt („Unterlagen“: farbige Plates, deren Farbe neben runden und schrägen Teilen zu sehen ist), dann das Bild
+5. **Fertig:** das ganze Mosaik in 3D und was es zusammenhält
+6. **Teileliste** wie hinten in LEGO-Heften: nach Farbfamilien, jedes Teil mit Stückzahl, Farbkürzel, LEGO-Farbname und Element-ID (ohne bekannte Element-ID die BrickLink-Nummer)
 
 Die Seitenzahl steht unten rechts. Schriften: die erste vorhandene aus `font_paths` bzw. `bold_font_paths` in `CONFIG.instructions`.
 
-**Kamera:** Sie schaut gerade von vorne und steil von oben (wie bei LEGO Art). Zeilen und Spalten bleiben dadurch gerade und abzählbar. Einstellbar ist das über `view_elevation_deg` und `view_azimuth_deg` in `CONFIG.instructions`: Ein Azimut über 0° dreht die Ansicht und zeigt zusätzlich die Seitenflächen.
+**Kamera:** Die Bauschritte sind senkrecht von oben gezeichnet: unverzerrt, jede Noppe ein Kreis, erhöhte Teile liegen genau über ihren Zellen. Titelblatt, Schlussseite und Teilbilder zeigen das Mosaik in 3D, gerade von vorne und steil von oben (wie bei LEGO Art); einstellbar über `view_elevation_deg` und `view_azimuth_deg` in `CONFIG.instructions`.
 
 **Farben:** Bereits gebaute Teile behalten ihre echte Farbe. Ausgeblasste Farben würden wie andere LEGO-Farben aussehen.
 
@@ -233,7 +249,7 @@ uv run lego-mosaik server        # danach http://127.0.0.1:8000/docs im Browser
 | `GET` | `/gesundheit` | Status und Stand des Teilekatalogs |
 | `GET` | `/farben?teile=plate,tile&exotisch=false` | Palette |
 | `GET` | `/verfahren` | Registrierte Verfahren und Ausgaben |
-| `POST` | `/mosaike` | Multipart: Datei `bild` plus optionale Felder wie bei `erstellen` (z. B. `unterbau`, `format`, `breite`, `stil`, `relief`, `relief_hoehe`, `titel`, `eckenfarbe`, `rahmen_erhoehung`) → `201` mit ID, Statistik, Download-URLs |
+| `POST` | `/mosaike` | Multipart: Datei `bild` plus optionale Felder wie bei `erstellen` (z. B. `unterbau`, `format`, `breite`, `stil`, `relief`, `relief_hoehe`, `aufraeumen`, `titel`, `eckenfarbe`, `rahmen_erhoehung`) → `201` mit ID, Statistik, Download-URLs |
 | `GET` | `/mosaike/{id}` | Inhalt von `ergebnis.json` |
 | `GET` | `/mosaike/{id}/dateien/{dateiname}` | Datei herunterladen (nur Namen aus `ergebnis.json`) |
 | `POST` | `/teile/aktualisieren?erzwingen=false` | Katalog aktualisieren |
@@ -307,9 +323,9 @@ src/lego_mosaik/
 └── interfaces/        cli.py (Typer), interactive.py (Menü), display.py (Rich-Ausgaben), api.py (FastAPI)
 ```
 
-**Ablauf:** Katalog laden → Palette, Farben und Unterbau prüfen → Größe bestimmen (Format, ggf. aus dem Seitenverhältnis, auf ganze Platten eingerastet) → Bild einpassen (für `formen` zusätzlich feiner) → nach Lab umrechnen → dithern (bei `max_colors` zweimal) → Rahmen samt Ecken einsetzen → Relief-Höhen bestimmen → Formteile pro Abschnitt wählen → übrige Noppen pro Abschnitt und Höhe zerlegen, Rahmen am Stück, Stützlagen → Unterbau und Pins bzw. Verbindungslage platzieren → alle Writer (`result_json` zuletzt).
+**Ablauf:** Katalog laden → Palette, Farben und Unterbau prüfen → Größe bestimmen (Format, ggf. aus dem Seitenverhältnis, auf ganze Platten eingerastet) → Bild einpassen (für `formen` zusätzlich feiner) → nach Lab umrechnen → dithern (bei `max_colors` zweimal, seltene Farben zusammenlegen, ggf. aufräumen) → Rahmen samt Ecken einsetzen → Relief-Höhen bestimmen → Formteile pro Abschnitt wählen → übrige Noppen pro Abschnitt und Höhe zerlegen, Rahmen am Stück, Stützlagen → Unterbau und Pins bzw. Verbindungslage platzieren → alle Writer (`result_json` zuletzt).
 
-**Lagen im Mosaik:** `Mosaic` trennt Unterbau, Verbinder, Verbindungslage, Stützteile, Rahmen, Relief (Stützlagen und Unterlagen) und Bild. `domain/sections.py` macht daraus die Bauschritte (`assembly_steps`); LDraw-Datei und Anleitung nutzen genau diese Reihenfolge.
+**Lagen im Mosaik:** `Mosaic` trennt Unterbau, Verbinder, Verbindungslage, Stützteile, Rahmen, Relief (Bricks und Plates), Unterlagen der Formteile und Bild. Ein Test prüft für mehrere Stile, dass jede Stelle pro Höhe nur von einem Teil belegt ist und jedes erhöhte Teil auf etwas steht. `domain/sections.py` macht daraus die Bauschritte (`assembly_steps`); LDraw-Datei und Anleitung nutzen genau diese Reihenfolge.
 
 **DRY bei den Oberflächen:** CLI, interaktiver Modus und API füllen alle dasselbe `OverrideInput` (rohe Texte und Zahlen). `parse_overrides` übersetzt es an genau einer Stelle in `MosaicOverrides`, `apply_overrides` prüft das Ergebnis.
 
@@ -341,7 +357,7 @@ src/lego_mosaik/
 
 ## Daten und Annahmen
 
-- **Quelle:** Rebrickable-Downloads `colors.csv.gz`, `parts.csv.gz` und `elements.csv.gz`, gelesen über die Spaltennamen. Die Sonderfarben `-1` und `9999` sind ausgeschlossen.
+- **Quelle:** Rebrickable-Downloads `colors.csv.gz`, `parts.csv.gz` und `elements.csv.gz`, dazu optional `sets.csv.gz`, `inventories.csv.gz` und `inventory_parts.csv.gz` für „nur aktuelle Teile“. Gelesen wird über die Spaltennamen. Die Sonderfarben `-1` und `9999` sind ausgeschlossen.
 - **Whitelist:** Nur Teile aus `daten/teil_geometrie.csv` werden verwendet. Die Tabelle enthält Maße, LDraw-Datei, Höhe, Achse der langen Seite, BrickLink-Nummer, Art des Umrisses (`shape`) und für eckige Formteile den Umriss als Polygon in Noppen (`outline`, Lage wie in der LDraw-Datei).
 - **LDraw-Farbcodes:** Rebrickable-IDs entsprechen **nicht immer** den LDraw-Codes. Beispiel: Rebrickable 326 „Olive Green“ ist LDraw 330, LDraw 326 ist „Yellowish Green“. Deshalb gilt:
   1. Override aus `daten/farb_zuordnung.csv`
