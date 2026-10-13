@@ -3,9 +3,16 @@ info:
   title: LEGO-Mosaik-Service
   description: "Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).\n\nAblauf für\
     \ ein Frontend:\n\n1. `GET /optionen` liefert Standardwerte und erlaubte Werte aller Formularfelder.\n\
-    2. `POST /mosaike` mit dem Bild (multipart) und optionalen Feldern. Die Antwort kommt,\n   wenn das\
-    \ Mosaik fertig ist (Sekunden bis wenige Minuten).\n3. Vorschau, Anleitung und Teilelisten über die\
-    \ URLs in `dateien` laden.\n\nFehler kommen immer als `{\"fehler\": \"…\"}` mit deutscher Meldung.\n"
+    2. Optional das Bild vorbereiten: `POST /bild/hintergrund` erkennt den Hintergrund,\n   `POST /bild/vorschau`\
+    \ zeigt das bearbeitete Bild (Filter, Ausschnitt, Hintergrund).\n3. `POST /mosaike` mit dem Bild (multipart)\
+    \ und optionalen Feldern, auch `preset` und\n   `palette`. Die Antwort kommt, wenn das Mosaik fertig\
+    \ ist (Sekunden bis wenige Minuten).\n4. Vorschau, Anleitung und Teilelisten über die URLs in `dateien`\
+    \ laden.\n5. Optional bearbeiten: `GET /mosaike/{id}/raster` liefert jede Noppe,\n   `POST /mosaike/{id}/bearbeiten`\
+    \ färbt Noppen und Flächen um (neues Mosaik).\n6. Optional: `POST /mosaike/{id}/preise` schätzt den\
+    \ Preis über BrickLink,\n   `GET /mosaike/{id}/bricklink` liefert die Wanted List zum Hochladen auf\
+    \ BrickLink.\n\nEigene Farbpaletten (`/paletten`) und Presets mit Bewertung und Favoriten (`/presets`)\n\
+    werden lokal in `daten/` gespeichert.\n\nFehler kommen immer als `{\"fehler\": \"…\"}` mit deutscher\
+    \ Meldung.\n"
   version: 0.1.0
 paths:
   /gesundheit:
@@ -136,6 +143,83 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /bild/hintergrund:
+    post:
+      tags:
+      - Bild
+      summary: Hintergrund erkennen
+      description: Erkennt den Hintergrund (häufigste Randfarbe, zusammenhängend vom Rand aus) des gedrehten
+        und zugeschnittenen Bilds. Mit `hintergrund_toleranz` steuern, wie ähnlich ein Pixel sein muss.
+        Danach z. B. `hintergrund=entfernen` und `hintergrundfarbe=lego_farbe.id` an `POST /mosaike` schicken.
+      operationId: detect_background
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_detect_background'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackgroundModel'
+        '400':
+          description: Kein lesbares Bild
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '413':
+          description: Datei zu groß
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /bild/vorschau:
+    post:
+      tags:
+      - Bild
+      summary: Bearbeitetes Bild als PNG
+      description: Das Bild nach Drehen, Ausschnitt, Farbfilter, Helligkeit/Kontrast/Sättigung und Hintergrund,
+        so wie es ins Dithering geht (noch nicht auf Noppen verkleinert).
+      operationId: preview_image
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_preview_image'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            image/png: {}
+        '400':
+          description: Kein lesbares Bild
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '413':
+          description: Datei zu groß
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
   /mosaike:
     post:
       tags:
@@ -157,6 +241,12 @@ paths:
                 $ref: '#/components/schemas/MosaicCreatedModel'
         '400':
           description: Kein lesbares Bild
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '404':
+          description: Nicht gefunden
           content:
             application/json:
               schema:
@@ -232,7 +322,7 @@ paths:
           title: File Name
       responses:
         '200':
-          description: Die Datei (PNG, PDF, LDraw, CSV, XML oder JSON)
+          description: Die Datei (PNG, PDF, LDraw, CSV, XML, JSON oder Originalbild)
         '404':
           description: Nicht gefunden
           content:
@@ -245,8 +335,657 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /mosaike/{mosaic_id}/raster:
+    get:
+      tags:
+      - Mosaike
+      summary: Farbraster für einen Editor
+      description: Farbe jeder Noppe (Inhalt von `raster.json`). Zeilen und Spalten zählen ab 1 inklusive
+        Rahmen, so wie `POST /mosaike/{id}/bearbeiten` sie erwartet.
+      operationId: get_raster
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RasterModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /mosaike/{mosaic_id}/bearbeiten:
+    post:
+      tags:
+      - Mosaike
+      summary: Noppen und Flächen umfärben
+      description: 'Rechnet das Mosaik mit den Änderungen neu: Teile, Teilelisten und Anleitung passen
+        danach zum Bild. Es entsteht ein neues Mosaik mit neuer ID (`basis` zeigt auf dieses); das alte
+        bleibt. Änderungen sammeln sich, das neue Mosaik lässt sich also weiter bearbeiten. Erlaubt ist
+        jede Farbe, die es für Teilarten und Stil als 1×1-Teil gibt; der Rahmen bleibt fest.'
+      operationId: edit_mosaic
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditRequestModel'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MosaicCreatedModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '500':
+          description: Verarbeitungsfehler
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /paletten:
+    get:
+      tags:
+      - Paletten
+      summary: Eigene Farbpaletten
+      operationId: list_palettes
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/PaletteModel'
+                type: array
+                title: Response List Palettes
+    post:
+      tags:
+      - Paletten
+      summary: Palette anlegen
+      operationId: create_palette
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaletteInputModel'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaletteModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /paletten/{palette_id}:
+    get:
+      tags:
+      - Paletten
+      summary: Eine Palette
+      operationId: get_palette
+      parameters:
+      - name: palette_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Palette Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaletteModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - Paletten
+      summary: Palette ersetzen
+      operationId: update_palette
+      parameters:
+      - name: palette_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Palette Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaletteInputModel'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaletteModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+    delete:
+      tags:
+      - Paletten
+      summary: Palette löschen
+      operationId: delete_palette
+      parameters:
+      - name: palette_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Palette Id
+      responses:
+        '204':
+          description: Successful Response
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /presets:
+    get:
+      tags:
+      - Presets
+      summary: Presets (Favoriten zuerst)
+      operationId: list_presets
+      parameters:
+      - name: sortierung
+        in: query
+        required: false
+        schema:
+          $ref: '#/components/schemas/PresetOrder'
+          description: 'Nach Favoriten: bewertung, nutzung, name oder neu'
+          default: bewertung
+        description: 'Nach Favoriten: bewertung, nutzung, name oder neu'
+      - name: favoriten
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Nur Favoriten
+          default: false
+          title: Favoriten
+        description: Nur Favoriten
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PresetModel'
+                title: Response List Presets
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - Presets
+      summary: Preset anlegen
+      description: Die Einstellungen werden wie bei `POST /mosaike` geprüft.
+      operationId: create_preset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresetInputModel'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresetModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /presets/{preset_id}:
+    get:
+      tags:
+      - Presets
+      summary: Ein Preset
+      operationId: get_preset
+      parameters:
+      - name: preset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Preset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresetModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - Presets
+      summary: Preset ersetzen
+      operationId: update_preset
+      parameters:
+      - name: preset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Preset Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresetInputModel'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresetModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+    patch:
+      tags:
+      - Presets
+      summary: Favorit oder Bewertung setzen
+      operationId: mark_preset
+      parameters:
+      - name: preset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Preset Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresetMarkModel'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresetModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+    delete:
+      tags:
+      - Presets
+      summary: Preset löschen
+      operationId: delete_preset
+      parameters:
+      - name: preset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Preset Id
+      responses:
+        '204':
+          description: Successful Response
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /mosaike/{mosaic_id}/preset:
+    post:
+      tags:
+      - Presets
+      summary: Einstellungen eines Mosaiks als Preset speichern
+      operationId: preset_from_mosaic
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresetFromMosaicModel'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresetModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+  /mosaike/{mosaic_id}/preise:
+    post:
+      tags:
+      - BrickLink
+      summary: Preis bei BrickLink schätzen
+      description: Fragt fehlende oder veraltete Preise beim BrickLink Price Guide ab (Verkäufe der letzten
+        6 Monate und aktuelle Angebote) und speichert `preise.json`, `preise_bricklink.csv` und die Wanted
+        List im Mosaik.
+      operationId: estimate_prices
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      - name: offline
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Nur gespeicherte Preise, keine Abfrage
+          default: false
+          title: Offline
+        description: Nur gespeicherte Preise, keine Abfrage
+      - name: erzwingen
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Alle Preise neu abfragen, auch aktuelle
+          default: false
+          title: Erzwingen
+        description: Alle Preise neu abfragen, auch aktuelle
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceEstimateModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '502':
+          description: BrickLink antwortet nicht oder mit einem Fehler
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '503':
+          description: BrickLink-Zugangsdaten fehlen
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+    get:
+      tags:
+      - BrickLink
+      summary: Gespeicherte Preisschätzung
+      operationId: get_prices
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceEstimateModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /mosaike/{mosaic_id}/bricklink:
+    get:
+      tags:
+      - BrickLink
+      summary: Wanted List für BrickLink
+      description: Die BrickLink-XML zum Einfügen auf der Upload-Seite (`upload_url`). Die BrickLink-API
+        selbst kann keine Wanted Lists anlegen.
+      operationId: get_bricklink_export
+      parameters:
+      - name: mosaic_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Mosaic Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrickLinkExportModel'
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+        '422':
+          description: Ungültige Angaben
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
 components:
   schemas:
+    AreaEditModel:
+      properties:
+        zeile:
+          type: integer
+          minimum: 1.0
+          title: Zeile
+          description: Zeile ab 1, inklusive Rahmen (wie in der Anleitung)
+        spalte:
+          type: integer
+          minimum: 1.0
+          title: Spalte
+          description: Spalte ab 1, inklusive Rahmen
+        farbe_id:
+          type: integer
+          title: Farbe Id
+          description: Neue Farbe (Rebrickable-ID)
+        breite:
+          type: integer
+          minimum: 1.0
+          title: Breite
+          description: Breite der Fläche in Noppen
+        hoehe:
+          type: integer
+          minimum: 1.0
+          title: Hoehe
+          description: Höhe der Fläche in Noppen
+      type: object
+      required:
+      - zeile
+      - spalte
+      - farbe_id
+      - breite
+      - hoehe
+      title: AreaEditModel
+    BackgroundModel:
+      properties:
+        farbe_hex:
+          type: string
+          title: Farbe Hex
+          description: Mittlere Farbe des Hintergrunds am Bildrand (#RRGGBB)
+        anteil:
+          type: number
+          title: Anteil
+          description: Anteil des Hintergrunds an der Bildfläche (0 bis 1)
+        lego_farbe:
+          $ref: '#/components/schemas/ColorModel'
+          description: Nächste LEGO-Farbe der Palette, z. B. als hintergrundfarbe
+        maske_png:
+          type: string
+          title: Maske Png
+          description: Maske als PNG-Data-URL (weiß = Hintergrund), direkt als <img src> nutzbar
+      type: object
+      required:
+      - farbe_hex
+      - anteil
+      - lego_farbe
+      - maske_png
+      title: BackgroundModel
+      description: Erkannter Hintergrund (``POST /bild/hintergrund``).
     Body_create_mosaic:
       properties:
         bild:
@@ -254,6 +993,18 @@ components:
           contentMediaType: application/octet-stream
           title: Bild
           description: Bilddatei (JPG, PNG, …)
+        preset:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preset
+          description: Gespeichertes Preset als Grundlage; angegebene Felder gehen vor
+        palette:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Palette
+          description: Eigene Palette (Name oder ID, siehe /paletten)
         unterbau:
           anyOf:
           - type: string
@@ -362,20 +1113,6 @@ components:
           - type: 'null'
           title: Modus
           description: 'Bild zuschneiden oder einpassen (Standard: zuschneiden)'
-        kontrast:
-          anyOf:
-          - type: number
-            minimum: 0.0
-          - type: 'null'
-          title: Kontrast
-          description: 'Kontrast, 1.0 = unverändert (Standard: 1.0)'
-        saettigung:
-          anyOf:
-          - type: number
-            minimum: 0.0
-          - type: 'null'
-          title: Saettigung
-          description: 'Sättigung, 1.0 = unverändert (Standard: 1.0)'
         teile:
           anyOf:
           - type: string
@@ -402,6 +1139,12 @@ components:
           - type: 'null'
           title: Max Farben
           description: 'Höchstens so viele Farben, 0 = alle (Standard: 0)'
+        farb_ids:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Farb Ids
+          description: Nur diese Farben (Rebrickable-IDs, z. B. 0,15,71)
         stil:
           anyOf:
           - type: string
@@ -467,6 +1210,18 @@ components:
           - type: 'null'
           title: Aufraeumen
           description: 'Einzelne Pixel durch die Nachbarfarbe ersetzen (Standard: nein)'
+        glaettung:
+          anyOf:
+          - type: string
+            enum:
+            - aus
+            - leicht
+            - mittel
+            - stark
+          - type: 'null'
+          title: Glaettung
+          description: 'Glättung: aus, leicht, mittel (Mehrheitsfarbe je Noppe) oder stark (Standard:
+            leicht)'
         zerlegung:
           anyOf:
           - type: string
@@ -481,18 +1236,387 @@ components:
           - type: string
           - type: 'null'
           title: Ausgaben
-          description: 'Erzeugte Dateien (ergebnis.json kommt immer dazu). Kommagetrennt aus: preview_png,
-            ldraw, parts_list_csv, official_parts_lists, instructions_png, result_json (Standard: preview_png,ldraw,parts_list_csv,official_parts_lists,instructions_png,result_json)'
+          description: 'Erzeugte Dateien (ergebnis.json und raster.json kommen immer dazu). Kommagetrennt
+            aus: preview_png, ldraw, parts_list_csv, official_parts_lists, instructions_png, raster_json,
+            result_json (Standard: preview_png,ldraw,parts_list_csv,official_parts_lists,instructions_png,raster_json,result_json)'
         titel:
           anyOf:
           - type: string
           - type: 'null'
           title: Titel
           description: 'Name auf dem Titelblatt (Standard: Dateiname)'
+        kontrast:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Kontrast
+          description: 'Kontrast, 1.0 = unverändert (Standard: 1.0)'
+        saettigung:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Saettigung
+          description: 'Sättigung, 1.0 = unverändert (Standard: 1.0)'
+        helligkeit:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Helligkeit
+          description: 'Helligkeit, 1.0 = unverändert (Standard: 1.0)'
+        farbfilter:
+          anyOf:
+          - type: string
+            enum:
+            - ohne
+            - graustufen
+            - sepia
+            - warm
+            - kalt
+            - invertieren
+            - poster
+            - vintage
+          - type: 'null'
+          title: Farbfilter
+          description: 'Farbfilter vor dem Dithering (Standard: ohne)'
+        filter_staerke:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Filter Staerke
+          description: 'Stärke des Filters, 0 bis 1 (Standard: 1.0)'
+        drehen:
+          anyOf:
+          - type: integer
+            enum:
+            - 0
+            - 90
+            - 180
+            - 270
+          - type: 'null'
+          title: Drehen
+          description: 'Drehen im Uhrzeigersinn in Grad (Standard: 0)'
+        spiegeln:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Spiegeln
+          description: 'Waagerecht spiegeln (Standard: nein)'
+        ausschnitt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ausschnitt
+          description: Ausschnitt x,y,Breite,Höhe in Prozent, z. B. 10,0,80,100
+        hintergrund:
+          anyOf:
+          - type: string
+            enum:
+            - behalten
+            - entfernen
+            - aufhellen
+            - abdunkeln
+            - entsaettigen
+            - weichzeichnen
+          - type: 'null'
+          title: Hintergrund
+          description: 'Was mit dem Hintergrund passiert (Standard: behalten)'
+        hintergrundfarbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Hintergrundfarbe
+          description: Neue Farbe bei „entfernen“ (Rebrickable-ID)
+        hintergrund_toleranz:
+          anyOf:
+          - type: number
+            maximum: 100.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hintergrund Toleranz
+          description: 'So ähnlich (ΔE) muss ein Pixel der Randfarbe sein (Standard: 12.0)'
+        hintergrund_staerke:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hintergrund Staerke
+          description: 'Stärke für aufhellen, abdunkeln, …, 0 bis 1 (Standard: 0.5)'
       type: object
       required:
       - bild
       title: Body_create_mosaic
+    Body_detect_background:
+      properties:
+        bild:
+          type: string
+          contentMediaType: application/octet-stream
+          title: Bild
+          description: Bilddatei (JPG, PNG, …)
+        kontrast:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Kontrast
+          description: 'Kontrast, 1.0 = unverändert (Standard: 1.0)'
+        saettigung:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Saettigung
+          description: 'Sättigung, 1.0 = unverändert (Standard: 1.0)'
+        helligkeit:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Helligkeit
+          description: 'Helligkeit, 1.0 = unverändert (Standard: 1.0)'
+        farbfilter:
+          anyOf:
+          - type: string
+            enum:
+            - ohne
+            - graustufen
+            - sepia
+            - warm
+            - kalt
+            - invertieren
+            - poster
+            - vintage
+          - type: 'null'
+          title: Farbfilter
+          description: 'Farbfilter vor dem Dithering (Standard: ohne)'
+        filter_staerke:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Filter Staerke
+          description: 'Stärke des Filters, 0 bis 1 (Standard: 1.0)'
+        drehen:
+          anyOf:
+          - type: integer
+            enum:
+            - 0
+            - 90
+            - 180
+            - 270
+          - type: 'null'
+          title: Drehen
+          description: 'Drehen im Uhrzeigersinn in Grad (Standard: 0)'
+        spiegeln:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Spiegeln
+          description: 'Waagerecht spiegeln (Standard: nein)'
+        ausschnitt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ausschnitt
+          description: Ausschnitt x,y,Breite,Höhe in Prozent, z. B. 10,0,80,100
+        hintergrund:
+          anyOf:
+          - type: string
+            enum:
+            - behalten
+            - entfernen
+            - aufhellen
+            - abdunkeln
+            - entsaettigen
+            - weichzeichnen
+          - type: 'null'
+          title: Hintergrund
+          description: 'Was mit dem Hintergrund passiert (Standard: behalten)'
+        hintergrundfarbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Hintergrundfarbe
+          description: Neue Farbe bei „entfernen“ (Rebrickable-ID)
+        hintergrund_toleranz:
+          anyOf:
+          - type: number
+            maximum: 100.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hintergrund Toleranz
+          description: 'So ähnlich (ΔE) muss ein Pixel der Randfarbe sein (Standard: 12.0)'
+        hintergrund_staerke:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hintergrund Staerke
+          description: 'Stärke für aufhellen, abdunkeln, …, 0 bis 1 (Standard: 0.5)'
+      type: object
+      required:
+      - bild
+      title: Body_detect_background
+    Body_preview_image:
+      properties:
+        bild:
+          type: string
+          contentMediaType: application/octet-stream
+          title: Bild
+          description: Bilddatei (JPG, PNG, …)
+        groesse:
+          type: integer
+          maximum: 2048.0
+          minimum: 64.0
+          title: Groesse
+          description: 'Längere Seite in Pixeln (Standard: 800)'
+          default: 800
+        kontrast:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Kontrast
+          description: 'Kontrast, 1.0 = unverändert (Standard: 1.0)'
+        saettigung:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Saettigung
+          description: 'Sättigung, 1.0 = unverändert (Standard: 1.0)'
+        helligkeit:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Helligkeit
+          description: 'Helligkeit, 1.0 = unverändert (Standard: 1.0)'
+        farbfilter:
+          anyOf:
+          - type: string
+            enum:
+            - ohne
+            - graustufen
+            - sepia
+            - warm
+            - kalt
+            - invertieren
+            - poster
+            - vintage
+          - type: 'null'
+          title: Farbfilter
+          description: 'Farbfilter vor dem Dithering (Standard: ohne)'
+        filter_staerke:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Filter Staerke
+          description: 'Stärke des Filters, 0 bis 1 (Standard: 1.0)'
+        drehen:
+          anyOf:
+          - type: integer
+            enum:
+            - 0
+            - 90
+            - 180
+            - 270
+          - type: 'null'
+          title: Drehen
+          description: 'Drehen im Uhrzeigersinn in Grad (Standard: 0)'
+        spiegeln:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Spiegeln
+          description: 'Waagerecht spiegeln (Standard: nein)'
+        ausschnitt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ausschnitt
+          description: Ausschnitt x,y,Breite,Höhe in Prozent, z. B. 10,0,80,100
+        hintergrund:
+          anyOf:
+          - type: string
+            enum:
+            - behalten
+            - entfernen
+            - aufhellen
+            - abdunkeln
+            - entsaettigen
+            - weichzeichnen
+          - type: 'null'
+          title: Hintergrund
+          description: 'Was mit dem Hintergrund passiert (Standard: behalten)'
+        hintergrundfarbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Hintergrundfarbe
+          description: Neue Farbe bei „entfernen“ (Rebrickable-ID)
+        hintergrund_toleranz:
+          anyOf:
+          - type: number
+            maximum: 100.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hintergrund Toleranz
+          description: 'So ähnlich (ΔE) muss ein Pixel der Randfarbe sein (Standard: 12.0)'
+        hintergrund_staerke:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hintergrund Staerke
+          description: 'Stärke für aufhellen, abdunkeln, …, 0 bis 1 (Standard: 0.5)'
+      type: object
+      required:
+      - bild
+      title: Body_preview_image
+    BrickLinkExportModel:
+      properties:
+        xml:
+          type: string
+          title: Xml
+          description: Inhalt von teileliste_bricklink.xml (BrickLink-XML)
+        upload_url:
+          type: string
+          title: Upload Url
+          description: Hier „Upload“ wählen und die XML einfügen bzw. die Datei hochladen
+        positionen:
+          type: integer
+          title: Positionen
+          description: Positionen in der XML
+        teile:
+          type: integer
+          title: Teile
+          description: Teile in der XML (Summe der Mengen)
+        ausgelassen:
+          items:
+            type: string
+          type: array
+          title: Ausgelassen
+          description: Farben ohne BrickLink-Farbcode, die nicht in der XML stehen
+      type: object
+      required:
+      - xml
+      - upload_url
+      - positionen
+      - teile
+      - ausgelassen
+      title: BrickLinkExportModel
+      description: Wanted List zum Einfügen auf BrickLink.
     CatalogFileModel:
       properties:
         datei:
@@ -561,6 +1685,32 @@ components:
       - bricklink_code
       - lego_name
       title: ColorModel
+    EditRequestModel:
+      properties:
+        noppen:
+          items:
+            $ref: '#/components/schemas/StudEditModel'
+          type: array
+          title: Noppen
+          description: Einzelne Noppen umfärben
+          default: []
+        flaechen:
+          items:
+            $ref: '#/components/schemas/AreaEditModel'
+          type: array
+          title: Flaechen
+          description: Rechtecke ab (zeile, spalte) umfärben
+          default: []
+        fuellen:
+          items:
+            $ref: '#/components/schemas/StudEditModel'
+          type: array
+          title: Fuellen
+          description: 'Farbeimer: die zusammenhängende gleichfarbige Fläche um (zeile, spalte)'
+          default: []
+      type: object
+      title: EditRequestModel
+      description: Änderungen für ``POST /mosaike/{id}/bearbeiten``; angewendet in dieser Reihenfolge.
     ErrorModel:
       properties:
         fehler:
@@ -674,6 +1824,12 @@ components:
           type: object
           title: Dateien
           description: Dateiname → absolute Download-URL
+        basis:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Basis
+          description: 'Bei bearbeiteten Mosaiken: ID des Mosaiks davor, sonst null'
       type: object
       required:
       - id
@@ -738,6 +1894,503 @@ components:
       - ldraw_code
       - noppen
       title: PaletteColorModel
+    PaletteInputModel:
+      properties:
+        name:
+          type: string
+          maxLength: 60
+          minLength: 1
+          title: Name
+          description: Name
+        beschreibung:
+          type: string
+          maxLength: 500
+          title: Beschreibung
+          default: ''
+        farb_ids:
+          items:
+            type: integer
+          type: array
+          minItems: 1
+          title: Farb Ids
+          description: Rebrickable-Farb-IDs (siehe /farben)
+      type: object
+      required:
+      - name
+      - farb_ids
+      title: PaletteInputModel
+      description: Eigene Palette anlegen oder ersetzen.
+    PaletteModel:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Kennung (aus dem Name), für URLs und das Feld palette
+        name:
+          type: string
+          title: Name
+          description: Name
+        beschreibung:
+          type: string
+          title: Beschreibung
+          description: Freitext
+        farb_ids:
+          items:
+            type: integer
+          type: array
+          title: Farb Ids
+          description: Rebrickable-Farb-IDs
+        farben:
+          items:
+            $ref: '#/components/schemas/RasterColorModel'
+          type: array
+          title: Farben
+          description: Die Farben mit Name und Hex-Wert
+      type: object
+      required:
+      - id
+      - name
+      - beschreibung
+      - farb_ids
+      - farben
+      title: PaletteModel
+    PartsListItemModel:
+      properties:
+        teil:
+          type: string
+          title: Teil
+          description: Rebrickable-Teilenummer
+        bricklink_teil:
+          type: string
+          title: Bricklink Teil
+          description: Teilenummer bei BrickLink
+        name:
+          type: string
+          title: Name
+          description: Teilname
+        farbe_id:
+          type: integer
+          title: Farbe Id
+          description: Rebrickable-Farb-ID
+        farbe:
+          type: string
+          title: Farbe
+          description: Farbname (Rebrickable)
+        bricklink_farbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Bricklink Farbe
+          description: BrickLink-Farbcode; null = unbekannt
+        anzahl:
+          type: integer
+          title: Anzahl
+          description: Stückzahl
+      type: object
+      required:
+      - teil
+      - bricklink_teil
+      - name
+      - farbe_id
+      - farbe
+      - bricklink_farbe
+      - anzahl
+      title: PartsListItemModel
+      description: Eine Position der Teileliste (``teileliste`` in ``ergebnis.json``).
+    PresetFromMosaicModel:
+      properties:
+        name:
+          type: string
+          maxLength: 60
+          minLength: 1
+          title: Name
+          description: Name
+        beschreibung:
+          type: string
+          maxLength: 500
+          title: Beschreibung
+          default: ''
+        favorit:
+          type: boolean
+          title: Favorit
+          description: Als Favorit markieren
+          default: false
+        bewertung:
+          type: integer
+          maximum: 5.0
+          minimum: 0.0
+          title: Bewertung
+          description: 0–5 Sterne
+          default: 0
+      type: object
+      required:
+      - name
+      title: PresetFromMosaicModel
+      description: Einstellungen eines fertigen Mosaiks als Preset speichern.
+    PresetInputModel:
+      properties:
+        name:
+          type: string
+          maxLength: 60
+          minLength: 1
+          title: Name
+          description: Name
+        beschreibung:
+          type: string
+          maxLength: 500
+          title: Beschreibung
+          default: ''
+        einstellungen:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: boolean
+          type: object
+          title: Einstellungen
+          description: Formularfelder von POST /mosaike (ohne bild und titel), dazu palette
+        favorit:
+          type: boolean
+          title: Favorit
+          description: Als Favorit markieren
+          default: false
+        bewertung:
+          type: integer
+          maximum: 5.0
+          minimum: 0.0
+          title: Bewertung
+          description: 0–5 Sterne
+          default: 0
+      type: object
+      required:
+      - name
+      - einstellungen
+      title: PresetInputModel
+      description: Preset anlegen oder ersetzen.
+    PresetMarkModel:
+      properties:
+        favorit:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Favorit
+          description: Favorit an/aus
+        bewertung:
+          anyOf:
+          - type: integer
+            maximum: 5.0
+            minimum: 0.0
+          - type: 'null'
+          title: Bewertung
+          description: 0–5 Sterne
+      type: object
+      title: PresetMarkModel
+      description: Nur Favorit und/oder Bewertung ändern (fehlende Felder bleiben).
+    PresetModel:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Kennung (aus dem Name), für URLs und das Feld preset
+        name:
+          type: string
+          title: Name
+          description: Name
+        beschreibung:
+          type: string
+          title: Beschreibung
+          description: Freitext
+        einstellungen:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: boolean
+          type: object
+          title: Einstellungen
+          description: Formularfelder von POST /mosaike
+        favorit:
+          type: boolean
+          title: Favorit
+          description: Favorit (steht in Listen oben)
+        bewertung:
+          type: integer
+          title: Bewertung
+          description: 0–5 Sterne (0 = unbewertet)
+        nutzungen:
+          type: integer
+          title: Nutzungen
+          description: So oft für ein Mosaik benutzt
+        erstellt:
+          type: string
+          title: Erstellt
+          description: Angelegt (ISO 8601, UTC)
+        geaendert:
+          type: string
+          title: Geaendert
+          description: Zuletzt geändert (ISO 8601, UTC)
+      type: object
+      required:
+      - id
+      - name
+      - beschreibung
+      - einstellungen
+      - favorit
+      - bewertung
+      - nutzungen
+      - erstellt
+      - geaendert
+      title: PresetModel
+    PresetOrder:
+      type: string
+      enum:
+      - bewertung
+      - nutzung
+      - name
+      - neu
+      title: PresetOrder
+      description: Sortierung der Preset-Liste (Favoriten stehen immer zuerst).
+    PriceEstimateModel:
+      properties:
+        waehrung:
+          type: string
+          title: Waehrung
+          description: Währung (ISO 4217), z. B. EUR
+        summe_verkauft:
+          type: number
+          title: Summe Verkauft
+          description: Summe aus den Ø Verkaufspreisen der letzten 6 Monate
+        summe_angeboten:
+          type: number
+          title: Summe Angeboten
+          description: Summe aus den Ø Preisen aktueller Angebote
+        vollstaendig:
+          type: boolean
+          title: Vollstaendig
+          description: False, wenn Positionen ohne Verkaufspreis fehlen
+        fehlend:
+          type: integer
+          title: Fehlend
+          description: Positionen ohne Verkaufspreis
+        stand:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stand
+          description: Ältester Preis (ISO 8601) oder null
+        zustand:
+          type: string
+          title: Zustand
+          description: N = neu, U = gebraucht
+        region:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Region
+          description: Region der Verkäufer; null = weltweit
+        land:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Land
+          description: Land der Verkäufer; null = alle
+        mwst:
+          type: string
+          title: Mwst
+          description: Y = mit MwSt., N = ohne, O = norwegische MwSt.
+        upload_url:
+          type: string
+          title: Upload Url
+          description: BrickLink-Seite zum Hochladen der Wanted List
+        positionen:
+          items:
+            $ref: '#/components/schemas/PriceLineModel'
+          type: array
+          title: Positionen
+          description: Alle Positionen der Teileliste
+      type: object
+      required:
+      - waehrung
+      - summe_verkauft
+      - summe_angeboten
+      - vollstaendig
+      - fehlend
+      - stand
+      - zustand
+      - region
+      - land
+      - mwst
+      - upload_url
+      - positionen
+      title: PriceEstimateModel
+      description: Inhalt von ``preise.json``.
+    PriceLineModel:
+      properties:
+        teil:
+          type: string
+          title: Teil
+          description: Rebrickable-Teilenummer
+        bricklink_teil:
+          type: string
+          title: Bricklink Teil
+          description: Teilenummer bei BrickLink
+        name:
+          type: string
+          title: Name
+          description: Teilname
+        farbe:
+          type: string
+          title: Farbe
+          description: Farbname (Rebrickable)
+        bricklink_farbe:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Bricklink Farbe
+          description: BrickLink-Farbcode; null = unbekannt
+        anzahl:
+          type: integer
+          title: Anzahl
+          description: Stückzahl
+        stueck_verkauft:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Stueck Verkauft
+          description: Ø Verkaufspreis pro Stück (6 Monate)
+        stueck_angeboten:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Stueck Angeboten
+          description: Ø Angebotspreis pro Stück
+        summe_verkauft:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Summe Verkauft
+          description: Anzahl × Ø Verkaufspreis
+        summe_angeboten:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Summe Angeboten
+          description: Anzahl × Ø Angebotspreis
+        hinweis:
+          type: string
+          title: Hinweis
+          description: Warum ein Preis fehlt; leer, wenn alles da ist
+      type: object
+      required:
+      - teil
+      - bricklink_teil
+      - name
+      - farbe
+      - bricklink_farbe
+      - anzahl
+      - stueck_verkauft
+      - stueck_angeboten
+      - summe_verkauft
+      - summe_angeboten
+      - hinweis
+      title: PriceLineModel
+    PriceSummaryModel:
+      properties:
+        waehrung:
+          type: string
+          title: Waehrung
+          description: Währung (ISO 4217), z. B. EUR
+        summe_verkauft:
+          type: number
+          title: Summe Verkauft
+          description: Summe aus den Ø Verkaufspreisen der letzten 6 Monate
+        summe_angeboten:
+          type: number
+          title: Summe Angeboten
+          description: Summe aus den Ø Preisen aktueller Angebote
+        vollstaendig:
+          type: boolean
+          title: Vollstaendig
+          description: False, wenn Positionen ohne Verkaufspreis fehlen
+        fehlend:
+          type: integer
+          title: Fehlend
+          description: Positionen ohne Verkaufspreis
+        stand:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stand
+          description: Ältester Preis (ISO 8601) oder null
+      type: object
+      required:
+      - waehrung
+      - summe_verkauft
+      - summe_angeboten
+      - vollstaendig
+      - fehlend
+      - stand
+      title: PriceSummaryModel
+      description: Summen der Preisschätzung (``preise`` in ``ergebnis.json``).
+    RasterColorModel:
+      properties:
+        id:
+          type: integer
+          title: Id
+          description: Rebrickable-Farb-ID
+        name:
+          type: string
+          title: Name
+          description: Farbname (Rebrickable)
+        hex:
+          type: string
+          title: Hex
+          description: 'Farbwert als #RRGGBB'
+      type: object
+      required:
+      - id
+      - name
+      - hex
+      title: RasterColorModel
+    RasterModel:
+      properties:
+        breite:
+          type: integer
+          title: Breite
+          description: Breite in Noppen, mit Rahmen
+        hoehe:
+          type: integer
+          title: Hoehe
+          description: Höhe in Noppen, mit Rahmen
+        rahmen:
+          type: integer
+          title: Rahmen
+          description: Rahmenbreite; diese äußeren Ringe sind nicht bearbeitbar
+        farben:
+          items:
+            $ref: '#/components/schemas/RasterColorModel'
+          type: array
+          title: Farben
+          description: Alle Farben im Raster
+        zeilen:
+          items:
+            items:
+              type: integer
+            type: array
+          type: array
+          title: Zeilen
+          description: Zeilen von oben nach unten, je Spalte die Farb-ID (zeilen[0][0] = oben links)
+      type: object
+      required:
+      - breite
+      - hoehe
+      - rahmen
+      - farben
+      - zeilen
+      title: RasterModel
+      description: 'Inhalt von ``raster.json``: Farbe jeder Noppe (für einen Editor).'
     ResultModel:
       properties:
         titel:
@@ -770,6 +2423,24 @@ components:
           type: array
           title: Palette
           description: Verwendete Farben
+        teileliste:
+          items:
+            $ref: '#/components/schemas/PartsListItemModel'
+          type: array
+          title: Teileliste
+          description: Teileliste (wie teileliste.csv und die Wanted List)
+          default: []
+        preise:
+          anyOf:
+          - $ref: '#/components/schemas/PriceSummaryModel'
+          - type: 'null'
+          description: Geschätzter Preis nach POST /mosaike/{id}/preise, sonst null
+        basis:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Basis
+          description: 'Bei bearbeiteten Mosaiken: ID des Mosaiks davor, sonst null'
         dateien:
           items:
             type: string
@@ -896,6 +2567,28 @@ components:
       - dauer_sekunden
       title: StatsModel
       description: Kennzahlen eines Mosaiks (``statistik`` in ``ergebnis.json``).
+    StudEditModel:
+      properties:
+        zeile:
+          type: integer
+          minimum: 1.0
+          title: Zeile
+          description: Zeile ab 1, inklusive Rahmen (wie in der Anleitung)
+        spalte:
+          type: integer
+          minimum: 1.0
+          title: Spalte
+          description: Spalte ab 1, inklusive Rahmen
+        farbe_id:
+          type: integer
+          title: Farbe Id
+          description: Neue Farbe (Rebrickable-ID)
+      type: object
+      required:
+      - zeile
+      - spalte
+      - farbe_id
+      title: StudEditModel
     UpdateFileModel:
       properties:
         datei:
