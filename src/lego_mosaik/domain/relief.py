@@ -4,22 +4,24 @@ Ergebnis ist ein Höhenraster: pro Zelle die Anzahl Plates unter dem sichtbaren 
 (0 = direkt auf dem Unterbau). Reine Funktionen auf NumPy-Arrays, ohne I/O.
 """
 
-from collections import deque
 from collections.abc import Sequence
 
 lazy import numpy as np
-lazy import numpy.typing as npt
 
-from lego_mosaik.domain.models import EMPTY_CELL, IndexGrid, LegoColor, ReliefMode
+from lego_mosaik.domain.editing import connected
+from lego_mosaik.domain.models import EMPTY_CELL, BoolGrid, IndexGrid, LegoColor, ReliefMode
 
 MAX_RELIEF_LEVELS = 3  # mehr Stufen werden instabil und die Anleitung unübersichtlich
 # Gewichte für die wahrgenommene Helligkeit (ITU-R BT.601)
 LUMA_WEIGHTS = (0.299, 0.587, 0.114)
-_NEIGHBORS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
 def relief_levels(
-    grid: IndexGrid, palette: Sequence[LegoColor], mode: ReliefMode, levels: int
+    grid: IndexGrid,
+    palette: Sequence[LegoColor],
+    mode: ReliefMode,
+    levels: int,
+    background: BoolGrid | None = None,
 ) -> IndexGrid:
     """Höhe in Plates pro Zelle; Zellen mit ``EMPTY_CELL`` (z. B. Rahmen) bleiben bei 0.
 
@@ -28,13 +30,16 @@ def relief_levels(
         palette: Die Farben des Rasters.
         mode: Art des Reliefs.
         levels: Höchste Stufe in Plates (1 bis ``MAX_RELIEF_LEVELS``).
+        background: Im Bild erkannter Hintergrund (für ``SUBJECT``); ``None`` = aus dem
+            Raster bestimmen (``background_mask``).
     """
     heights = np.zeros(grid.shape, dtype=np.intp)
     used = grid != EMPTY_CELL
     if mode is ReliefMode.NONE or levels == 0 or not used.any():
         return heights
     if mode is ReliefMode.SUBJECT:
-        heights[used & ~background_mask(grid)] = levels
+        flat = background_mask(grid) if background is None else background
+        heights[used & ~flat] = levels
         return heights
     luma = np.array([_luma(color) for color in palette])[np.where(used, grid, 0)]
     if mode is ReliefMode.DARK:
@@ -45,7 +50,7 @@ def relief_levels(
     return heights
 
 
-def background_mask(grid: IndexGrid) -> npt.NDArray[np.bool_]:
+def background_mask(grid: IndexGrid) -> BoolGrid:
     """Hintergrund: die häufigste Randfarbe, soweit sie zusammenhängend vom Rand aus reicht.
 
     Ein Flutfüllen (Breitensuche über die vier Nachbarn) beginnt an allen Randzellen in
@@ -61,20 +66,7 @@ def background_mask(grid: IndexGrid) -> npt.NDArray[np.bool_]:
     ]
     colors = np.array([grid[cell] for cell in border])
     background = int(np.bincount(colors).argmax())
-    mask = np.zeros(grid.shape, dtype=bool)
-    queue = deque(cell for cell in border if grid[cell] == background)
-    for cell in queue:
-        mask[cell] = True
-    height, width = grid.shape
-    while queue:
-        row, col = queue.popleft()  # deque: Entnehmen vorne in O(1)
-        for d_row, d_col in _NEIGHBORS:
-            nr, nc = row + d_row, col + d_col
-            inside = 0 <= nr < height and 0 <= nc < width
-            if inside and not mask[nr, nc] and grid[nr, nc] == background:
-                mask[nr, nc] = True
-                queue.append((nr, nc))
-    return mask
+    return connected(grid == background, border)
 
 
 def _luma(color: LegoColor) -> float:

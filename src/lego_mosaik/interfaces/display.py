@@ -1,14 +1,22 @@
 """Gemeinsame Rich-Ausgaben für die Kommandozeile und den interaktiven Modus."""
 
+from collections.abc import Mapping, Sequence
+from decimal import Decimal
+
 lazy from rich.console import Console
 lazy from rich.table import Table
 lazy from rich.text import Text
 
 from lego_mosaik.domain.layout import FORMATS, ArtFormat
+from lego_mosaik.domain.library import MAX_RATING, ColorPalette, Preset
 from lego_mosaik.domain.models import LegoColor, Mosaic
-lazy from lego_mosaik.pipeline import MosaicResult
+lazy from lego_mosaik.pipeline import BackgroundResult, MosaicResult
+lazy from lego_mosaik.pricing.estimate import PriceEstimate
 
 SWATCH = "      "  # Leerzeichen, die mit der Farbe als Hintergrund ein Farbfeld ergeben
+SMALL_SWATCH = "  "
+STAR, NO_STAR = "★", "☆"
+PERCENT = 100
 UPPER_HALF_BLOCK = "▀"  # obere Hälfte farbig (Vordergrund), untere = Hintergrund
 
 
@@ -85,6 +93,105 @@ def print_palette(console: Console, palette: tuple[LegoColor, ...]) -> None:
             color.lego_name or "",
         )
     console.print(table)
+
+
+def print_background(console: Console, result: BackgroundResult) -> None:
+    """Erkannter Hintergrund: Farbe, Anteil und vorgeschlagene LEGO-Farbe."""
+    red, green, blue = result.report.color
+    hex_value = f"#{red:02X}{green:02X}{blue:02X}"
+    lego = result.lego_color
+    table = Table(title="Hintergrund", show_header=False)
+    table.add_row("Farbe am Rand", f"[on {hex_value}]{SWATCH}[/] {hex_value}")
+    table.add_row("Anteil", f"{result.report.share * PERCENT:.0f} % der Bildfläche")
+    table.add_row("LEGO-Farbe", f"[on {lego.hex}]{SWATCH}[/] {lego.name} (ID {lego.id})")
+    console.print(table)
+    console.print(f"Entfernen mit: --hintergrund entfernen --hintergrundfarbe {lego.id}")
+
+
+def print_palettes(
+    console: Console, palettes: Sequence[ColorPalette], colors: Mapping[int, LegoColor]
+) -> None:
+    """Tabelle der eigenen Paletten mit kleinen Farbfeldern."""
+    if not palettes:
+        console.print(
+            "Noch keine Paletten. Anlegen mit: lego-mosaik paletten anlegen NAME --farben 0,15"
+        )
+        return
+    table = Table("ID", "Name", "Farben", "Beschreibung", title=f"Paletten ({len(palettes)})")
+    for palette in palettes:
+        swatches = "".join(
+            f"[on {colors[cid].hex}]{SMALL_SWATCH}[/]" if cid in colors else "??"
+            for cid in palette.color_ids
+        )
+        table.add_row(
+            palette.id, palette.name, f"{swatches} ({len(palette.color_ids)})", palette.description
+        )
+    console.print(table)
+
+
+def print_presets(console: Console, presets: Sequence[Preset]) -> None:
+    """Tabelle der Presets: Favorit, Sterne, Nutzungen, Einstellungen."""
+    if not presets:
+        console.print("Noch keine Presets. Speichern mit: lego-mosaik presets speichern NAME")
+        return
+    table = Table(
+        "", "ID", "Name", "Bewertung", "Benutzt", "Einstellungen", title=f"Presets ({len(presets)})"
+    )
+    for preset in presets:
+        settings = ", ".join(f"{name}={value}" for name, value in preset.settings.items())
+        table.add_row(
+            "♥" if preset.favorite else "",
+            preset.id,
+            preset.name,
+            STAR * preset.rating + NO_STAR * (MAX_RATING - preset.rating),
+            str(preset.uses),
+            settings,
+        )
+    console.print(table)
+
+
+def print_prices(console: Console, estimate: PriceEstimate, upload_url: str) -> None:
+    """Tabelle der Preise pro Position, Summen und Hinweis zum Hochladen der Wanted List."""
+    currency = estimate.currency
+    table = Table(
+        "Teil",
+        "Farbe",
+        "Anzahl",
+        "Ø verkauft",
+        "Ø angeboten",
+        "Summe",
+        "Hinweis",
+        title=f"Geschätzter Preis bei BrickLink ({currency})",
+    )
+    for line in estimate.lines:
+        table.add_row(
+            f"{line.item.bricklink_item} {line.item.name}",
+            line.item.color_name,
+            str(line.item.quantity),
+            _money(line.sold, 4),
+            _money(line.stock, 4),
+            _money(line.total_sold, 2),
+            f"[yellow]{line.note}[/yellow]" if line.note else "",
+        )
+    console.print(table)
+    console.print(
+        f"[bold]Summe (Ø Verkäufe der letzten 6 Monate):[/bold] "
+        f"{_money(estimate.total_sold, 2)} {currency}"
+    )
+    console.print(
+        f"[bold]Summe (Ø aktuelle Angebote):[/bold] {_money(estimate.total_stock, 2)} {currency}"
+    )
+    if not estimate.complete:
+        missing = len(estimate.missing)
+        console.print(f"[yellow]Unvollständig: {missing} Positionen ohne Verkaufspreis.[/yellow]")
+    if estimate.oldest is not None:
+        console.print(f"Stand: {estimate.oldest:%d.%m.%Y %H:%M} (UTC)")
+    console.print(f"Wanted List hochladen: {upload_url} (teileliste_bricklink.xml)")
+
+
+def _money(value: Decimal | None, places: int) -> str:
+    """Betrag mit Dezimalkomma, „–“ ohne Wert."""
+    return "–" if value is None else f"{value:.{places}f}".replace(".", ",")
 
 
 def mosaic_preview(mosaic: Mosaic, max_columns: int) -> Text:

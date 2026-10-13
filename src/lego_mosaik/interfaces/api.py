@@ -12,6 +12,7 @@ Authentifizierung. Dateien werden nur ausgeliefert, wenn ihr Name in
 """
 
 import asyncio
+import base64
 import logging
 import re
 from collections.abc import AsyncIterator, Callable
@@ -20,56 +21,107 @@ from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, Any
+from xml.etree import ElementTree
 
 import yaml
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException
 
-from lego_mosaik.config import AppConfig, OverrideInput, ServerConfig, parse_overrides, run_title
-from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
+from lego_mosaik.config import (
+    AppConfig,
+    MosaicOverrides,
+    OverrideInput,
+    ServerConfig,
+    form_values,
+    override_input,
+    parse_overrides,
+    run_title,
+)
+from lego_mosaik.domain.editing import AreaEdit, FillEdit, GridEdit, StudEdit
+from lego_mosaik.domain.errors import (
+    ConfigError,
+    InvalidImageError,
+    LegoMosaicError,
+    MissingCredentialsError,
+    NotFoundError,
+    PriceSourceError,
+)
+from lego_mosaik.domain.library import ColorPalette, Preset, PresetOrder
 from lego_mosaik.domain.models import LegoColor
 from lego_mosaik.interfaces.api_models import (
+    BackgroundModel,
+    BrickLinkExportModel,
     CatalogFileModel,
     ColorModel,
+    EditRequestModel,
     ErrorModel,
     FieldOption,
     HealthModel,
     MosaicCreatedModel,
     OptionsModel,
+    PaletteInputModel,
+    PaletteModel,
+    PresetFromMosaicModel,
+    PresetInputModel,
+    PresetMarkModel,
+    PresetModel,
+    PriceEstimateModel,
+    RasterColorModel,
+    RasterModel,
     ResultModel,
     UpdateFileModel,
     form_options,
     options_model,
 )
-from lego_mosaik.pipeline import FINAL_WRITER_NAME, MosaicPipeline, safe_name
+from lego_mosaik.outputs.official_parts_lists import BRICKLINK_FILE_NAME, bricklink_xml
+from lego_mosaik.outputs.price_list import JSON_FILE_NAME as PRICES_FILE
+from lego_mosaik.outputs.raster_json import FILE_NAME as RASTER_FILE
+from lego_mosaik.pipeline import FINAL_WRITER_NAME, MosaicPipeline, MosaicResult, safe_name
+from lego_mosaik.pricing.service import PriceService, read_order_items
+from lego_mosaik.storage.library import Library
 
 logger = logging.getLogger(__name__)
 
 BYTES_PER_MB = 1024 * 1024
 SECONDS_PER_HOUR = 60 * 60
 RESULT_FILE = "ergebnis.json"
+# Ausgaben, die die API immer braucht: Dateiliste und Statistik bzw. das Raster für den Editor
+REQUIRED_OUTPUTS = ("raster_json", FINAL_WRITER_NAME)
+PREVIEW_PX, MIN_PREVIEW_PX, MAX_PREVIEW_PX = 800, 64, 2048
+MASK_PREVIEW_PX = 512
 # IDs sind Ordnernamen der Form 2026-10-12_143005_katze (nur sichere Zeichen)
 VALID_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 type PipelineFactory = Callable[[AppConfig], MosaicPipeline]
+type PriceFactory = Callable[[AppConfig], PriceService]
 
 DESCRIPTION = """Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).
 
 Ablauf für ein Frontend:
 
 1. `GET /optionen` liefert Standardwerte und erlaubte Werte aller Formularfelder.
-2. `POST /mosaike` mit dem Bild (multipart) und optionalen Feldern. Die Antwort kommt,
-   wenn das Mosaik fertig ist (Sekunden bis wenige Minuten).
-3. Vorschau, Anleitung und Teilelisten über die URLs in `dateien` laden.
+2. Optional das Bild vorbereiten: `POST /bild/hintergrund` erkennt den Hintergrund,
+   `POST /bild/vorschau` zeigt das bearbeitete Bild (Filter, Ausschnitt, Hintergrund).
+3. `POST /mosaike` mit dem Bild (multipart) und optionalen Feldern, auch `preset` und
+   `palette`. Die Antwort kommt, wenn das Mosaik fertig ist (Sekunden bis wenige Minuten).
+4. Vorschau, Anleitung und Teilelisten über die URLs in `dateien` laden.
+5. Optional bearbeiten: `GET /mosaike/{id}/raster` liefert jede Noppe,
+   `POST /mosaike/{id}/bearbeiten` färbt Noppen und Flächen um (neues Mosaik).
+6. Optional: `POST /mosaike/{id}/preise` schätzt den Preis über BrickLink,
+   `GET /mosaike/{id}/bricklink` liefert die Wanted List zum Hochladen auf BrickLink.
+
+Eigene Farbpaletten (`/paletten`) und Presets mit Bewertung und Favoriten (`/presets`)
+werden lokal in `daten/` gespeichert.
 
 Fehler kommen immer als `{"fehler": "…"}` mit deutscher Meldung.
 """
 # Gruppen in /docs und in generierten Clients
-TAG_MOSAICS, TAG_CATALOG = "Mosaike", "Katalog"
+TAG_MOSAICS, TAG_CATALOG, TAG_BRICKLINK = "Mosaike", "Katalog", "BrickLink"
+TAG_IMAGE, TAG_PALETTES, TAG_PRESETS = "Bild", "Paletten", "Presets"
 
 
 # --- Fehlerantworten (OpenAPI) ---------------------------------------------------------
@@ -83,6 +135,8 @@ def _errors(*codes: int) -> dict[int | str, dict[str, Any]]:
         413: "Datei zu groß",
         422: "Ungültige Angaben",
         500: "Verarbeitungsfehler",
+        502: "BrickLink antwortet nicht oder mit einem Fehler",
+        503: "BrickLink-Zugangsdaten fehlen",
     }
     return {code: {"model": ErrorModel, "description": texts[code]} for code in codes}
 
@@ -90,9 +144,17 @@ def _errors(*codes: int) -> dict[int | str, dict[str, Any]]:
 # --- App-Fabrik ------------------------------------------------------------------------
 
 
-def create_app(config: AppConfig, pipeline_factory: PipelineFactory) -> FastAPI:
-    """Baut die FastAPI-App (Factory) mit Hintergrund-Aktualisierung des Katalogs."""
+def create_app(
+    config: AppConfig,
+    pipeline_factory: PipelineFactory,
+    price_factory: PriceFactory | None = None,
+) -> FastAPI:
+    """Baut die FastAPI-App (Factory) mit Hintergrund-Aktualisierung des Katalogs.
+
+    Ohne ``price_factory`` fehlt nur die Preisschätzung (``/mosaike/{id}/preise``).
+    """
     pipeline = pipeline_factory(config)
+    library = Library.open(config.storage)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -113,8 +175,13 @@ def create_app(config: AppConfig, pipeline_factory: PipelineFactory) -> FastAPI:
     _add_cors(app, config.server)
     _register_error_handlers(app)
     options = form_options(config, pipeline.method_names)
-    _register_catalog_routes(app, pipeline, options)
-    _register_mosaic_routes(app, pipeline, config, options)
+    _register_catalog_routes(app, pipeline, library, options)
+    _register_image_routes(app, pipeline, config, options)
+    _register_mosaic_routes(app, pipeline, library, config, options)
+    _register_library_routes(app, pipeline, library, config)
+    _register_bricklink_routes(
+        app, config, None if price_factory is None else price_factory(config)
+    )
 
     @app.get("/openapi.yaml", include_in_schema=False)
     def openapi_document() -> Response:
@@ -140,7 +207,7 @@ def _add_cors(app: FastAPI, server: ServerConfig) -> None:
         CORSMiddleware,
         allow_origins=list(server.cors_origins),
         allow_origin_regex=server.cors_origin_regex,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["*"],
         expose_headers=["Content-Disposition"],
     )
@@ -172,12 +239,19 @@ def _register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(LegoMosaicError)
     async def domain_error(_: Request, error: LegoMosaicError) -> JSONResponse:
-        # Ungültige Parameter → 422, ungültiges Bild → 400, sonst Verarbeitungsfehler → 500
+        # Ungültige Parameter → 422, ungültiges Bild → 400, BrickLink → 503 bzw. 502,
+        # sonst Verarbeitungsfehler → 500
         code = status.HTTP_500_INTERNAL_SERVER_ERROR
-        if isinstance(error, ConfigError):
+        if isinstance(error, NotFoundError):
+            code = status.HTTP_404_NOT_FOUND
+        elif isinstance(error, ConfigError):
             code = status.HTTP_422_UNPROCESSABLE_CONTENT
         elif isinstance(error, InvalidImageError):
             code = status.HTTP_400_BAD_REQUEST
+        elif isinstance(error, MissingCredentialsError):
+            code = status.HTTP_503_SERVICE_UNAVAILABLE
+        elif isinstance(error, PriceSourceError):
+            code = status.HTTP_502_BAD_GATEWAY
         return JSONResponse({"fehler": str(error)}, status_code=code)
 
     @app.exception_handler(HTTPException)
@@ -194,7 +268,7 @@ def _register_error_handlers(app: FastAPI) -> None:
 
 
 def _register_catalog_routes(
-    app: FastAPI, pipeline: MosaicPipeline, options: dict[str, FieldOption]
+    app: FastAPI, pipeline: MosaicPipeline, library: Library, options: dict[str, FieldOption]
 ) -> None:
     """``/gesundheit``, ``/optionen``, ``/farben``, ``/verfahren``, ``/teile/aktualisieren``."""
 
@@ -216,7 +290,9 @@ def _register_catalog_routes(
         tags=[TAG_MOSAICS],
     )
     def get_options() -> OptionsModel:
-        return options_model(options)
+        palettes = tuple(palette.id for palette in library.palettes.list())
+        presets = tuple(preset.id for preset in library.presets.list())
+        return options_model(options, palettes, presets)
 
     @app.get(
         "/farben",
@@ -263,14 +339,13 @@ def _color_model(color: LegoColor) -> ColorModel:
     )
 
 
-def _register_mosaic_routes(
-    app: FastAPI, pipeline: MosaicPipeline, config: AppConfig, options: dict[str, FieldOption]
-) -> None:
-    """``POST /mosaike``, ``GET /mosaike/{id}``, ``GET /mosaike/{id}/dateien/{name}``."""
-    max_bytes = config.server.max_upload_mb * BYTES_PER_MB
+type FormField = Callable[..., Any]
+
+
+def _form_field(options: dict[str, FieldOption]) -> FormField:
+    """Baut Formularfelder mit Standardwert und erlaubten Werten aus ``options``."""
 
     def field(name: str, json_type: str, description: str, alias: str | None = None) -> Any:
-        """Formularfeld mit Standardwert und erlaubten Werten aus ``options``."""
         option = options[name]
         return Form(
             alias=alias,
@@ -278,18 +353,177 @@ def _register_mosaic_routes(
             json_schema_extra=option.schema(json_type),
         )
 
+    return field
+
+
+def _image_form(options: dict[str, FieldOption]) -> Callable[..., dict[str, object]]:
+    """Formularfelder der Bildbearbeitung (für ``/mosaike`` und ``/bild/...``) als Abhängigkeit.
+
+    FastAPI übernimmt die Felder einer Abhängigkeit in denselben Multipart-Body; so stehen
+    sie nur einmal hier und gelten für alle drei Routen gleich.
+    """
+    field = _form_field(options)
+
+    def image_fields(
+        kontrast: Annotated[
+            float | None, field("kontrast", "number", "Kontrast, 1.0 = unverändert")
+        ] = None,
+        saettigung: Annotated[
+            float | None, field("saettigung", "number", "Sättigung, 1.0 = unverändert")
+        ] = None,
+        helligkeit: Annotated[
+            float | None, field("helligkeit", "number", "Helligkeit, 1.0 = unverändert")
+        ] = None,
+        farbfilter: Annotated[
+            str | None, field("farbfilter", "string", "Farbfilter vor dem Dithering")
+        ] = None,
+        filter_staerke: Annotated[
+            float | None, field("filter_staerke", "number", "Stärke des Filters, 0 bis 1")
+        ] = None,
+        drehen: Annotated[
+            int | None, field("drehen", "integer", "Drehen im Uhrzeigersinn in Grad")
+        ] = None,
+        spiegeln: Annotated[
+            bool | None, field("spiegeln", "boolean", "Waagerecht spiegeln")
+        ] = None,
+        ausschnitt: Annotated[
+            str | None,
+            field(
+                "ausschnitt", "string", "Ausschnitt x,y,Breite,Höhe in Prozent, z. B. 10,0,80,100"
+            ),
+        ] = None,
+        hintergrund: Annotated[
+            str | None, field("hintergrund", "string", "Was mit dem Hintergrund passiert")
+        ] = None,
+        hintergrundfarbe: Annotated[
+            int | None,
+            field("hintergrundfarbe", "integer", "Neue Farbe bei „entfernen“ (Rebrickable-ID)"),
+        ] = None,
+        hintergrund_toleranz: Annotated[
+            float | None,
+            field(
+                "hintergrund_toleranz",
+                "number",
+                "So ähnlich (ΔE) muss ein Pixel der Randfarbe sein",
+            ),
+        ] = None,
+        hintergrund_staerke: Annotated[
+            float | None,
+            field("hintergrund_staerke", "number", "Stärke für aufhellen, abdunkeln, …, 0 bis 1"),
+        ] = None,
+    ) -> dict[str, object]:
+        return {
+            "kontrast": kontrast,
+            "saettigung": saettigung,
+            "helligkeit": helligkeit,
+            "farbfilter": farbfilter,
+            "filter_staerke": filter_staerke,
+            "drehen": drehen,
+            "spiegeln": spiegeln,
+            "ausschnitt": ausschnitt,
+            "hintergrund": hintergrund,
+            "hintergrundfarbe": hintergrundfarbe,
+            "hintergrund_toleranz": hintergrund_toleranz,
+            "hintergrund_staerke": hintergrund_staerke,
+        }
+
+    return image_fields
+
+
+def _register_image_routes(
+    app: FastAPI, pipeline: MosaicPipeline, config: AppConfig, options: dict[str, FieldOption]
+) -> None:
+    """``POST /bild/hintergrund`` und ``POST /bild/vorschau``: Bild vor dem Mosaik bearbeiten."""
+    max_bytes = config.server.max_upload_mb * BYTES_PER_MB
+    image_fields = _image_form(options)
+
+    @app.post(
+        "/bild/hintergrund",
+        summary="Hintergrund erkennen",
+        description="Erkennt den Hintergrund (häufigste Randfarbe, zusammenhängend vom Rand aus) "
+        "des gedrehten und zugeschnittenen Bilds. Mit `hintergrund_toleranz` steuern, wie "
+        "ähnlich ein Pixel sein muss. Danach z. B. `hintergrund=entfernen` und "
+        "`hintergrundfarbe=lego_farbe.id` an `POST /mosaike` schicken.",
+        responses=_errors(400, 413, 422),
+        tags=[TAG_IMAGE],
+    )
+    def detect_background(
+        bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
+        bearbeitung: Annotated[dict[str, object], Depends(image_fields)],
+    ) -> BackgroundModel:
+        data = _read_limited(bild, max_bytes)
+        result = pipeline.detect_background(
+            data, parse_overrides(override_input(bearbeitung)), max_px=MASK_PREVIEW_PX
+        )
+        red, green, blue = result.report.color
+        mask = base64.b64encode(result.report.mask_png).decode("ascii")
+        return BackgroundModel(
+            farbe_hex=f"#{red:02X}{green:02X}{blue:02X}",
+            anteil=round(result.report.share, 4),
+            lego_farbe=_color_model(result.lego_color),
+            maske_png=f"data:image/png;base64,{mask}",
+        )
+
+    @app.post(
+        "/bild/vorschau",
+        summary="Bearbeitetes Bild als PNG",
+        description="Das Bild nach Drehen, Ausschnitt, Farbfilter, Helligkeit/Kontrast/Sättigung "
+        "und Hintergrund, so wie es ins Dithering geht (noch nicht auf Noppen verkleinert).",
+        response_class=Response,
+        responses={200: {"content": {"image/png": {}}}, **_errors(400, 413, 422)},
+        tags=[TAG_IMAGE],
+    )
+    def preview_image(
+        bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
+        bearbeitung: Annotated[dict[str, object], Depends(image_fields)],
+        groesse: Annotated[
+            int,
+            Form(
+                ge=MIN_PREVIEW_PX,
+                le=MAX_PREVIEW_PX,
+                description=f"Längere Seite in Pixeln (Standard: {PREVIEW_PX})",
+            ),
+        ] = PREVIEW_PX,
+    ) -> Response:
+        data = _read_limited(bild, max_bytes)
+        png = pipeline.edited_image(
+            data, parse_overrides(override_input(bearbeitung)), max_px=groesse
+        )
+        return Response(png, media_type="image/png")
+
+
+def _register_mosaic_routes(
+    app: FastAPI,
+    pipeline: MosaicPipeline,
+    library: Library,
+    config: AppConfig,
+    options: dict[str, FieldOption],
+) -> None:
+    """``/mosaike``, ``/mosaike/{id}``, Dateien, Raster und Bearbeiten."""
+    max_bytes = config.server.max_upload_mb * BYTES_PER_MB
+    field = _form_field(options)
+    image_fields = _image_form(options)
+
     # Normales def (kein async def): FastAPI führt es im Threadpool aus, der Server
     # bleibt während der rechenintensiven Mosaikerzeugung ansprechbar
     @app.post(
         "/mosaike",
         status_code=status.HTTP_201_CREATED,
         summary="Mosaik erzeugen",
-        responses=_errors(400, 413, 422, 500),
+        responses=_errors(400, 404, 413, 422, 500),
         tags=[TAG_MOSAICS],
     )
     def create_mosaic(
         request: Request,
         bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
+        bearbeitung: Annotated[dict[str, object], Depends(image_fields)],
+        preset: Annotated[
+            str | None,
+            Form(description="Gespeichertes Preset als Grundlage; angegebene Felder gehen vor"),
+        ] = None,
+        palette: Annotated[
+            str | None, Form(description="Eigene Palette (Name oder ID, siehe /paletten)")
+        ] = None,
         unterbau: Annotated[str | None, field("unterbau", "string", "Unterbau")] = None,
         plattengroesse: Annotated[
             int | None, field("plattengroesse", "integer", "Plattengröße in Noppen")
@@ -323,12 +557,6 @@ def _register_mosaic_routes(
         modus: Annotated[
             str | None, field("modus", "string", "Bild zuschneiden oder einpassen")
         ] = None,
-        kontrast: Annotated[
-            float | None, field("kontrast", "number", "Kontrast, 1.0 = unverändert")
-        ] = None,
-        saettigung: Annotated[
-            float | None, field("saettigung", "number", "Sättigung, 1.0 = unverändert")
-        ] = None,
         teile: Annotated[str | None, field("teile", "string", "Teilarten des Bilds")] = None,
         farbkategorien: Annotated[
             str | None, field("farbkategorien", "string", "Farbkategorien")
@@ -338,6 +566,10 @@ def _register_mosaic_routes(
         ] = False,
         max_farben: Annotated[
             int | None, field("max_farben", "integer", "Höchstens so viele Farben, 0 = alle")
+        ] = None,
+        farb_ids: Annotated[
+            str | None,
+            field("farb_ids", "string", "Nur diese Farben (Rebrickable-IDs, z. B. 0,15,71)"),
         ] = None,
         stil: Annotated[str | None, field("stil", "string", "Stil der Bildteile")] = None,
         relief: Annotated[str | None, field("relief", "string", "Was erhöht wird")] = None,
@@ -355,59 +587,68 @@ def _register_mosaic_routes(
             bool | None,
             field("aufraeumen", "boolean", "Einzelne Pixel durch die Nachbarfarbe ersetzen"),
         ] = None,
+        glaettung: Annotated[
+            str | None,
+            field(
+                "glaettung",
+                "string",
+                "Glättung: aus, leicht, mittel (Mehrheitsfarbe je Noppe) oder stark",
+            ),
+        ] = None,
         zerlegung: Annotated[
             str | None, field("zerlegung", "string", "Zerlegungsverfahren")
         ] = None,
         ausgaben: Annotated[
             str | None,
-            field("ausgaben", "string", "Erzeugte Dateien (ergebnis.json kommt immer dazu)"),
+            field(
+                "ausgaben",
+                "string",
+                "Erzeugte Dateien (ergebnis.json und raster.json kommen immer dazu)",
+            ),
         ] = None,
         titel: Annotated[
             str | None, field("titel", "string", "Name auf dem Titelblatt (Standard: Dateiname)")
         ] = None,
     ) -> MosaicCreatedModel:
         data = _read_limited(bild, max_bytes)
-        raw = OverrideInput(
-            substrate=unterbau,
-            plate_studs=plattengroesse,
-            art_format=format_name,
-            plates=platten,
-            width_studs=breite,
-            height_studs=hoehe,
-            substrate_color_id=unterbaufarbe,
-            frame_width=rahmen,
-            frame_color_id=rahmenfarbe,
-            frame_corner_color_id=eckenfarbe,
-            frame_part_kinds=rahmen_teile,
-            frame_raise_plates=rahmen_erhoehung,
-            fit_mode=modus,
-            contrast=kontrast,
-            saturation=saettigung,
-            part_kinds=teile,
-            color_categories=farbkategorien,
-            exotic_colors=exotische_farben,
-            max_colors=max_farben,
-            style=stil,
-            relief=relief,
-            relief_levels=relief_hoehe,
-            dithering_method=dithering,
-            strength=staerke,
-            color_distance=farbabstand,
-            despeckle=aufraeumen,
-            tiling_strategy=zerlegung,
-            outputs=ausgaben,
-            title=titel,
-        )
-        overrides = parse_overrides(raw)
-        # ergebnis.json braucht die API immer: Dateiliste und Statistik kommen daraus
-        if overrides.outputs and FINAL_WRITER_NAME not in overrides.outputs:
-            overrides = replace(overrides, outputs=(*overrides.outputs, FINAL_WRITER_NAME))
-        title = run_title(raw, safe_name(Path(bild.filename or "mosaik").stem))
-        result = pipeline.run(data, overrides, title=title)
-        content = _result(result.target_dir)
-        base_url = str(request.base_url).rstrip("/")
-        urls = {name: f"{base_url}/mosaike/{result.id}/dateien/{name}" for name in content.dateien}
-        return MosaicCreatedModel(id=result.id, statistik=content.statistik, dateien=urls)
+        values = bearbeitung | {
+            "unterbau": unterbau,
+            "plattengroesse": plattengroesse,
+            "format": format_name,
+            "platten": platten,
+            "breite": breite,
+            "hoehe": hoehe,
+            "unterbaufarbe": unterbaufarbe,
+            "rahmen": rahmen,
+            "rahmenfarbe": rahmenfarbe,
+            "eckenfarbe": eckenfarbe,
+            "rahmen_teile": rahmen_teile,
+            "rahmen_erhoehung": rahmen_erhoehung,
+            "modus": modus,
+            "teile": teile,
+            "farbkategorien": farbkategorien,
+            "exotische_farben": exotische_farben or None,  # False = nicht angegeben
+            "max_farben": max_farben,
+            "farb_ids": farb_ids,
+            "stil": stil,
+            "relief": relief,
+            "relief_hoehe": relief_hoehe,
+            "dithering": dithering,
+            "staerke": staerke,
+            "farbabstand": farbabstand,
+            "aufraeumen": aufraeumen,
+            "glaettung": glaettung,
+            "zerlegung": zerlegung,
+            "ausgaben": ausgaben,
+            "titel": titel,
+        }
+        resolved = library.resolve(values, preset=preset, palette=palette)
+        overrides = _with_required_outputs(parse_overrides(resolved.inputs), config)
+        title = run_title(resolved.inputs, safe_name(Path(bild.filename or "mosaik").stem))
+        result = pipeline.run(data, overrides, title=title, inputs=resolved.inputs)
+        if resolved.preset is not None:
+            library.presets.record_use(resolved.preset.id)
+        return _created(request, result)
 
     @app.get(
         "/mosaike/{mosaic_id}",
@@ -424,7 +665,7 @@ def _register_mosaic_routes(
         response_class=FileResponse,
         tags=[TAG_MOSAICS],
         responses={
-            200: {"description": "Die Datei (PNG, PDF, LDraw, CSV, XML oder JSON)"},
+            200: {"description": "Die Datei (PNG, PDF, LDraw, CSV, XML, JSON oder Originalbild)"},
             **_errors(404),
         },
     )
@@ -434,6 +675,321 @@ def _register_mosaic_routes(
         if file_name not in _result(directory).dateien:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Datei „{file_name}“ gibt es nicht.")
         return FileResponse(directory / file_name, filename=file_name)
+
+    @app.get(
+        "/mosaike/{mosaic_id}/raster",
+        summary="Farbraster für einen Editor",
+        description="Farbe jeder Noppe (Inhalt von `raster.json`). Zeilen und Spalten zählen "
+        "ab 1 inklusive Rahmen, so wie `POST /mosaike/{id}/bearbeiten` sie erwartet.",
+        responses=_errors(404),
+        tags=[TAG_MOSAICS],
+    )
+    def get_raster(mosaic_id: str) -> RasterModel:
+        path = _mosaic_dir(config.output_dir, mosaic_id) / RASTER_FILE
+        if not path.is_file():
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "Für dieses Mosaik gibt es kein Raster (raster_json)."
+            )
+        return RasterModel.model_validate_json(path.read_bytes())
+
+    @app.post(
+        "/mosaike/{mosaic_id}/bearbeiten",
+        status_code=status.HTTP_201_CREATED,
+        summary="Noppen und Flächen umfärben",
+        description="Rechnet das Mosaik mit den Änderungen neu: Teile, Teilelisten und Anleitung "
+        "passen danach zum Bild. Es entsteht ein neues Mosaik mit neuer ID (`basis` zeigt auf "
+        "dieses); das alte bleibt. Änderungen sammeln sich, das neue Mosaik lässt sich also "
+        "weiter bearbeiten. Erlaubt ist jede Farbe, die es für Teilarten und Stil als "
+        "1×1-Teil gibt; der Rahmen bleibt fest.",
+        responses=_errors(404, 422, 500),
+        tags=[TAG_MOSAICS],
+    )
+    def edit_mosaic(
+        request: Request, mosaic_id: str, aenderungen: EditRequestModel
+    ) -> MosaicCreatedModel:
+        directory = _mosaic_dir(config.output_dir, mosaic_id)
+        edits = _edits(aenderungen)
+        if not edits:
+            raise ConfigError("Bitte mindestens eine Änderung angeben.")
+        result = pipeline.edit(directory, edits, required_outputs=REQUIRED_OUTPUTS)
+        return _created(request, result)
+
+
+def _register_library_routes(
+    app: FastAPI, pipeline: MosaicPipeline, library: Library, config: AppConfig
+) -> None:
+    """``/paletten`` und ``/presets`` sowie ``POST /mosaike/{id}/preset``."""
+
+    def palette_model(palette: ColorPalette) -> PaletteModel:
+        known = pipeline.load_catalog().colors
+        colors = [known[cid] for cid in palette.color_ids if cid in known]
+        return PaletteModel(
+            id=palette.id,
+            name=palette.name,
+            beschreibung=palette.description,
+            farb_ids=list(palette.color_ids),
+            farben=[RasterColorModel(id=c.id, name=c.name, hex=c.hex) for c in colors],
+        )
+
+    def check_preset(values: dict[str, object]) -> dict[str, str | int | float | bool]:
+        return library.preset_settings(values, pipeline.check)
+
+    @app.get("/paletten", summary="Eigene Farbpaletten", tags=[TAG_PALETTES])
+    def list_palettes() -> list[PaletteModel]:
+        return [palette_model(palette) for palette in library.palettes.list()]
+
+    @app.post(
+        "/paletten",
+        status_code=status.HTTP_201_CREATED,
+        summary="Palette anlegen",
+        responses=_errors(422),
+        tags=[TAG_PALETTES],
+    )
+    def create_palette(palette: PaletteInputModel) -> PaletteModel:
+        pipeline.colors(palette.farb_ids)  # unbekannte IDs → 422
+        created = library.palettes.create(palette.name, palette.beschreibung, palette.farb_ids)
+        return palette_model(created)
+
+    @app.get(
+        "/paletten/{palette_id}",
+        summary="Eine Palette",
+        responses=_errors(404),
+        tags=[TAG_PALETTES],
+    )
+    def get_palette(palette_id: str) -> PaletteModel:
+        return palette_model(library.palettes.get(palette_id))
+
+    @app.put(
+        "/paletten/{palette_id}",
+        summary="Palette ersetzen",
+        responses=_errors(404, 422),
+        tags=[TAG_PALETTES],
+    )
+    def update_palette(palette_id: str, palette: PaletteInputModel) -> PaletteModel:
+        pipeline.colors(palette.farb_ids)
+        updated = library.palettes.update(
+            palette_id, palette.name, palette.beschreibung, palette.farb_ids
+        )
+        return palette_model(updated)
+
+    @app.delete(
+        "/paletten/{palette_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="Palette löschen",
+        responses=_errors(404),
+        tags=[TAG_PALETTES],
+    )
+    def delete_palette(palette_id: str) -> None:
+        library.palettes.delete(palette_id)
+
+    @app.get("/presets", summary="Presets (Favoriten zuerst)", tags=[TAG_PRESETS])
+    def list_presets(
+        sortierung: Annotated[
+            PresetOrder, Query(description="Nach Favoriten: bewertung, nutzung, name oder neu")
+        ] = PresetOrder.RATING,
+        favoriten: Annotated[bool, Query(description="Nur Favoriten")] = False,
+    ) -> list[PresetModel]:
+        presets = library.presets.list(sortierung, favorites_only=favoriten)
+        return [_preset_model(preset) for preset in presets]
+
+    @app.post(
+        "/presets",
+        status_code=status.HTTP_201_CREATED,
+        summary="Preset anlegen",
+        description="Die Einstellungen werden wie bei `POST /mosaike` geprüft.",
+        responses=_errors(404, 422),
+        tags=[TAG_PRESETS],
+    )
+    def create_preset(preset: PresetInputModel) -> PresetModel:
+        created = library.presets.create(
+            preset.name,
+            preset.beschreibung,
+            check_preset(dict(preset.einstellungen)),
+            favorite=preset.favorit,
+            rating=preset.bewertung,
+        )
+        return _preset_model(created)
+
+    @app.get(
+        "/presets/{preset_id}", summary="Ein Preset", responses=_errors(404), tags=[TAG_PRESETS]
+    )
+    def get_preset(preset_id: str) -> PresetModel:
+        return _preset_model(library.presets.get(preset_id))
+
+    @app.put(
+        "/presets/{preset_id}",
+        summary="Preset ersetzen",
+        responses=_errors(404, 422),
+        tags=[TAG_PRESETS],
+    )
+    def update_preset(preset_id: str, preset: PresetInputModel) -> PresetModel:
+        updated = library.presets.update(
+            preset_id,
+            preset.name,
+            preset.beschreibung,
+            check_preset(dict(preset.einstellungen)),
+            favorite=preset.favorit,
+            rating=preset.bewertung,
+        )
+        return _preset_model(updated)
+
+    @app.patch(
+        "/presets/{preset_id}",
+        summary="Favorit oder Bewertung setzen",
+        responses=_errors(404, 422),
+        tags=[TAG_PRESETS],
+    )
+    def mark_preset(preset_id: str, markierung: PresetMarkModel) -> PresetModel:
+        marked = library.presets.mark(
+            preset_id, favorite=markierung.favorit, rating=markierung.bewertung
+        )
+        return _preset_model(marked)
+
+    @app.delete(
+        "/presets/{preset_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="Preset löschen",
+        responses=_errors(404),
+        tags=[TAG_PRESETS],
+    )
+    def delete_preset(preset_id: str) -> None:
+        library.presets.delete(preset_id)
+
+    @app.post(
+        "/mosaike/{mosaic_id}/preset",
+        status_code=status.HTTP_201_CREATED,
+        summary="Einstellungen eines Mosaiks als Preset speichern",
+        responses=_errors(404, 422),
+        tags=[TAG_PRESETS],
+    )
+    def preset_from_mosaic(mosaic_id: str, preset: PresetFromMosaicModel) -> PresetModel:
+        directory = _mosaic_dir(config.output_dir, mosaic_id)
+        values = form_values(pipeline.inputs_of(directory))
+        values.pop("titel", None)
+        created = library.presets.create(
+            preset.name,
+            preset.beschreibung,
+            check_preset(values),
+            favorite=preset.favorit,
+            rating=preset.bewertung,
+        )
+        return _preset_model(created)
+
+
+def _preset_model(preset: Preset) -> PresetModel:
+    return PresetModel(
+        id=preset.id,
+        name=preset.name,
+        beschreibung=preset.description,
+        einstellungen=dict(preset.settings),
+        favorit=preset.favorite,
+        bewertung=preset.rating,
+        nutzungen=preset.uses,
+        erstellt=preset.created.isoformat(),
+        geaendert=preset.changed.isoformat(),
+    )
+
+
+def _with_required_outputs(overrides: MosaicOverrides, config: AppConfig) -> MosaicOverrides:
+    """``ergebnis.json`` und ``raster.json`` braucht die API immer (Dateiliste, Editor)."""
+    outputs = overrides.outputs or config.outputs
+    missing = tuple(name for name in REQUIRED_OUTPUTS if name not in outputs)
+    return replace(overrides, outputs=(*outputs, *missing)) if missing else overrides
+
+
+def _edits(request: EditRequestModel) -> list[GridEdit]:
+    """Änderungen in der Reihenfolge noppen, flaechen, fuellen."""
+    edits: list[GridEdit] = [StudEdit(e.zeile, e.spalte, e.farbe_id) for e in request.noppen]
+    edits += [AreaEdit(e.zeile, e.spalte, e.breite, e.hoehe, e.farbe_id) for e in request.flaechen]
+    edits += [FillEdit(e.zeile, e.spalte, e.farbe_id) for e in request.fuellen]
+    return edits
+
+
+def _created(request: Request, result: MosaicResult) -> MosaicCreatedModel:
+    """Antwort mit Statistik und absoluten Download-URLs aus ``ergebnis.json``."""
+    content = _result(result.target_dir)
+    base_url = str(request.base_url).rstrip("/")
+    urls = {name: f"{base_url}/mosaike/{result.id}/dateien/{name}" for name in content.dateien}
+    return MosaicCreatedModel(
+        id=result.id, statistik=content.statistik, dateien=urls, basis=content.basis
+    )
+
+
+def _register_bricklink_routes(
+    app: FastAPI, config: AppConfig, prices: PriceService | None
+) -> None:
+    """``/mosaike/{id}/preise`` (nur mit Preisdienst) und ``/mosaike/{id}/bricklink``."""
+
+    if prices is not None:
+
+        @app.post(
+            "/mosaike/{mosaic_id}/preise",
+            summary="Preis bei BrickLink schätzen",
+            description="Fragt fehlende oder veraltete Preise beim BrickLink Price Guide ab "
+            "(Verkäufe der letzten 6 Monate und aktuelle Angebote) und speichert "
+            "`preise.json`, `preise_bricklink.csv` und die Wanted List im Mosaik.",
+            responses=_errors(404, 422, 502, 503),
+            tags=[TAG_BRICKLINK],
+        )
+        def estimate_prices(
+            mosaic_id: str,
+            offline: Annotated[
+                bool, Query(description="Nur gespeicherte Preise, keine Abfrage")
+            ] = False,
+            erzwingen: Annotated[
+                bool, Query(description="Alle Preise neu abfragen, auch aktuelle")
+            ] = False,
+        ) -> PriceEstimateModel:
+            directory = _mosaic_dir(config.output_dir, mosaic_id)
+            prices.estimate(directory, offline=offline, force=erzwingen)
+            return _prices(directory)
+
+    @app.get(
+        "/mosaike/{mosaic_id}/preise",
+        summary="Gespeicherte Preisschätzung",
+        responses=_errors(404),
+        tags=[TAG_BRICKLINK],
+    )
+    def get_prices(mosaic_id: str) -> PriceEstimateModel:
+        directory = _mosaic_dir(config.output_dir, mosaic_id)
+        if not (directory / PRICES_FILE).is_file():
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "Für dieses Mosaik gibt es noch keine Preise."
+            )
+        return _prices(directory)
+
+    @app.get(
+        "/mosaike/{mosaic_id}/bricklink",
+        summary="Wanted List für BrickLink",
+        description="Die BrickLink-XML zum Einfügen auf der Upload-Seite (`upload_url`). "
+        "Die BrickLink-API selbst kann keine Wanted Lists anlegen.",
+        responses=_errors(404, 422),
+        tags=[TAG_BRICKLINK],
+    )
+    def get_bricklink_export(mosaic_id: str) -> BrickLinkExportModel:
+        directory = _mosaic_dir(config.output_dir, mosaic_id)
+        items = read_order_items(directory)
+        path = directory / BRICKLINK_FILE_NAME
+        # Die Datei enthält nach einer Preisschätzung auch Höchstpreise
+        if path.is_file():
+            xml = path.read_text(encoding="utf-8")
+        else:
+            xml, _ = bricklink_xml(items, condition=config.pricing.condition)
+        quantities = [
+            int(item.findtext("MINQTY") or 0) for item in ElementTree.fromstring(xml).iter("ITEM")
+        ]
+        skipped = sorted({item.color_name for item in items if item.bricklink_color is None})
+        return BrickLinkExportModel(
+            xml=xml,
+            upload_url=config.pricing.upload_url,
+            positionen=len(quantities),
+            teile=sum(quantities),
+            ausgelassen=skipped,
+        )
+
+
+def _prices(directory: Path) -> PriceEstimateModel:
+    return PriceEstimateModel.model_validate_json((directory / PRICES_FILE).read_bytes())
 
 
 def _read_limited(upload: UploadFile, max_bytes: int) -> bytes:

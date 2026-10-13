@@ -33,6 +33,10 @@ class ColorSpace(Protocol):
         """Index der nächsten Palettenfarbe für Lab-Werte der Form ``(..., 3)``."""
         ...
 
+    def distances(self, left_lab: FloatImage, right_lab: FloatImage) -> FloatImage:
+        """N×M-Tabelle der Farbabstände zwischen N×3- und M×3-Lab-Werten."""
+        ...
+
     def to_rgb(self, lab: FloatImage) -> FloatImage:
         """Lab → RGB (0.0–255.0)."""
         ...

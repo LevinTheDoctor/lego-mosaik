@@ -12,15 +12,21 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from lego_mosaik.config import (
+    BACKGROUND_LABELS,
     COLOR_DISTANCE_LABELS,
+    COLOR_FILTER_LABELS,
     FIT_MODE_LABELS,
+    MAX_BACKGROUND_TOLERANCE,
     MAX_FRAME_RAISE,
     RELIEF_LABELS,
+    ROTATIONS,
+    SMOOTHING_LABELS,
     SUBSTRATE_LABELS,
     AppConfig,
     label_of,
 )
 from lego_mosaik.domain.layout import FORMATS, MAX_STUDS, MIN_STUDS
+from lego_mosaik.domain.library import MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, MAX_RATING
 from lego_mosaik.domain.models import MOSAIC_PART_KINDS, ColorCategory
 from lego_mosaik.domain.relief import MAX_RELIEF_LEVELS
 
@@ -104,6 +110,198 @@ class MosaicCreatedModel(BaseModel):
     id: str = Field(description="ID des Mosaiks (Name des Ausgabeordners)")
     statistik: StatsModel = Field(description="Kennzahlen des Mosaiks")
     dateien: dict[str, str] = Field(description="Dateiname → absolute Download-URL")
+    basis: str | None = Field(
+        default=None, description="Bei bearbeiteten Mosaiken: ID des Mosaiks davor, sonst null"
+    )
+
+
+# --- Bild bearbeiten und Raster ------------------------------------------------------
+
+
+class BackgroundModel(BaseModel):
+    """Erkannter Hintergrund (``POST /bild/hintergrund``)."""
+
+    farbe_hex: str = Field(description="Mittlere Farbe des Hintergrunds am Bildrand (#RRGGBB)")
+    anteil: float = Field(description="Anteil des Hintergrunds an der Bildfläche (0 bis 1)")
+    lego_farbe: ColorModel = Field(
+        description="Nächste LEGO-Farbe der Palette, z. B. als hintergrundfarbe"
+    )
+    maske_png: str = Field(
+        description="Maske als PNG-Data-URL (weiß = Hintergrund), direkt als <img src> nutzbar"
+    )
+
+
+class RasterColorModel(BaseModel):
+    id: int = Field(description="Rebrickable-Farb-ID")
+    name: str = Field(description="Farbname (Rebrickable)")
+    hex: str = Field(description="Farbwert als #RRGGBB")
+
+
+class RasterModel(BaseModel):
+    """Inhalt von ``raster.json``: Farbe jeder Noppe (für einen Editor)."""
+
+    breite: int = Field(description="Breite in Noppen, mit Rahmen")
+    hoehe: int = Field(description="Höhe in Noppen, mit Rahmen")
+    rahmen: int = Field(description="Rahmenbreite; diese äußeren Ringe sind nicht bearbeitbar")
+    farben: list[RasterColorModel] = Field(description="Alle Farben im Raster")
+    zeilen: list[list[int]] = Field(
+        description="Zeilen von oben nach unten, je Spalte die Farb-ID (zeilen[0][0] = oben links)"
+    )
+
+
+class StudEditModel(BaseModel):
+    zeile: int = Field(ge=1, description="Zeile ab 1, inklusive Rahmen (wie in der Anleitung)")
+    spalte: int = Field(ge=1, description="Spalte ab 1, inklusive Rahmen")
+    farbe_id: int = Field(description="Neue Farbe (Rebrickable-ID)")
+
+
+class AreaEditModel(StudEditModel):
+    breite: int = Field(ge=1, description="Breite der Fläche in Noppen")
+    hoehe: int = Field(ge=1, description="Höhe der Fläche in Noppen")
+
+
+class EditRequestModel(BaseModel):
+    """Änderungen für ``POST /mosaike/{id}/bearbeiten``; angewendet in dieser Reihenfolge."""
+
+    noppen: list[StudEditModel] = Field(default=[], description="Einzelne Noppen umfärben")
+    flaechen: list[AreaEditModel] = Field(
+        default=[], description="Rechtecke ab (zeile, spalte) umfärben"
+    )
+    fuellen: list[StudEditModel] = Field(
+        default=[],
+        description="Farbeimer: die zusammenhängende gleichfarbige Fläche um (zeile, spalte)",
+    )
+
+
+# --- Paletten und Presets --------------------------------------------------------------
+
+
+class PaletteInputModel(BaseModel):
+    """Eigene Palette anlegen oder ersetzen."""
+
+    name: str = Field(min_length=1, max_length=MAX_NAME_LENGTH, description="Name")
+    beschreibung: str = Field(default="", max_length=MAX_DESCRIPTION_LENGTH)
+    farb_ids: list[int] = Field(min_length=1, description="Rebrickable-Farb-IDs (siehe /farben)")
+
+
+class PaletteModel(BaseModel):
+    id: str = Field(description="Kennung (aus dem Name), für URLs und das Feld palette")
+    name: str = Field(description="Name")
+    beschreibung: str = Field(description="Freitext")
+    farb_ids: list[int] = Field(description="Rebrickable-Farb-IDs")
+    farben: list[RasterColorModel] = Field(description="Die Farben mit Name und Hex-Wert")
+
+
+class PresetInputModel(BaseModel):
+    """Preset anlegen oder ersetzen."""
+
+    name: str = Field(min_length=1, max_length=MAX_NAME_LENGTH, description="Name")
+    beschreibung: str = Field(default="", max_length=MAX_DESCRIPTION_LENGTH)
+    einstellungen: dict[str, str | int | float | bool] = Field(
+        description="Formularfelder von POST /mosaike (ohne bild und titel), dazu palette"
+    )
+    favorit: bool = Field(default=False, description="Als Favorit markieren")
+    bewertung: int = Field(default=0, ge=0, le=MAX_RATING, description="0–5 Sterne")
+
+
+class PresetFromMosaicModel(BaseModel):
+    """Einstellungen eines fertigen Mosaiks als Preset speichern."""
+
+    name: str = Field(min_length=1, max_length=MAX_NAME_LENGTH, description="Name")
+    beschreibung: str = Field(default="", max_length=MAX_DESCRIPTION_LENGTH)
+    favorit: bool = Field(default=False, description="Als Favorit markieren")
+    bewertung: int = Field(default=0, ge=0, le=MAX_RATING, description="0–5 Sterne")
+
+
+class PresetMarkModel(BaseModel):
+    """Nur Favorit und/oder Bewertung ändern (fehlende Felder bleiben)."""
+
+    favorit: bool | None = Field(default=None, description="Favorit an/aus")
+    bewertung: int | None = Field(default=None, ge=0, le=MAX_RATING, description="0–5 Sterne")
+
+
+class PresetModel(BaseModel):
+    id: str = Field(description="Kennung (aus dem Name), für URLs und das Feld preset")
+    name: str = Field(description="Name")
+    beschreibung: str = Field(description="Freitext")
+    einstellungen: dict[str, str | int | float | bool] = Field(
+        description="Formularfelder von POST /mosaike"
+    )
+    favorit: bool = Field(description="Favorit (steht in Listen oben)")
+    bewertung: int = Field(description="0–5 Sterne (0 = unbewertet)")
+    nutzungen: int = Field(description="So oft für ein Mosaik benutzt")
+    erstellt: str = Field(description="Angelegt (ISO 8601, UTC)")
+    geaendert: str = Field(description="Zuletzt geändert (ISO 8601, UTC)")
+
+
+# --- BrickLink: Preise und Wanted List -------------------------------------------------
+
+
+class PartsListItemModel(BaseModel):
+    """Eine Position der Teileliste (``teileliste`` in ``ergebnis.json``)."""
+
+    teil: str = Field(description="Rebrickable-Teilenummer")
+    bricklink_teil: str = Field(description="Teilenummer bei BrickLink")
+    name: str = Field(description="Teilname")
+    farbe_id: int = Field(description="Rebrickable-Farb-ID")
+    farbe: str = Field(description="Farbname (Rebrickable)")
+    bricklink_farbe: int | None = Field(description="BrickLink-Farbcode; null = unbekannt")
+    anzahl: int = Field(description="Stückzahl")
+
+
+class PriceSummaryModel(BaseModel):
+    """Summen der Preisschätzung (``preise`` in ``ergebnis.json``)."""
+
+    waehrung: str = Field(description="Währung (ISO 4217), z. B. EUR")
+    summe_verkauft: float = Field(
+        description="Summe aus den Ø Verkaufspreisen der letzten 6 Monate"
+    )
+    summe_angeboten: float = Field(description="Summe aus den Ø Preisen aktueller Angebote")
+    vollstaendig: bool = Field(description="False, wenn Positionen ohne Verkaufspreis fehlen")
+    fehlend: int = Field(description="Positionen ohne Verkaufspreis")
+    stand: str | None = Field(description="Ältester Preis (ISO 8601) oder null")
+
+
+class PriceLineModel(BaseModel):
+    teil: str = Field(description="Rebrickable-Teilenummer")
+    bricklink_teil: str = Field(description="Teilenummer bei BrickLink")
+    name: str = Field(description="Teilname")
+    farbe: str = Field(description="Farbname (Rebrickable)")
+    bricklink_farbe: int | None = Field(description="BrickLink-Farbcode; null = unbekannt")
+    anzahl: int = Field(description="Stückzahl")
+    stueck_verkauft: float | None = Field(description="Ø Verkaufspreis pro Stück (6 Monate)")
+    stueck_angeboten: float | None = Field(description="Ø Angebotspreis pro Stück")
+    summe_verkauft: float | None = Field(description="Anzahl × Ø Verkaufspreis")
+    summe_angeboten: float | None = Field(description="Anzahl × Ø Angebotspreis")
+    hinweis: str = Field(description="Warum ein Preis fehlt; leer, wenn alles da ist")
+
+
+class PriceEstimateModel(PriceSummaryModel):
+    """Inhalt von ``preise.json``."""
+
+    zustand: str = Field(description="N = neu, U = gebraucht")
+    region: str | None = Field(description="Region der Verkäufer; null = weltweit")
+    land: str | None = Field(description="Land der Verkäufer; null = alle")
+    mwst: str = Field(description="Y = mit MwSt., N = ohne, O = norwegische MwSt.")
+    upload_url: str = Field(description="BrickLink-Seite zum Hochladen der Wanted List")
+    positionen: list[PriceLineModel] = Field(description="Alle Positionen der Teileliste")
+
+
+class BrickLinkExportModel(BaseModel):
+    """Wanted List zum Einfügen auf BrickLink."""
+
+    xml: str = Field(description="Inhalt von teileliste_bricklink.xml (BrickLink-XML)")
+    upload_url: str = Field(
+        description="Hier „Upload“ wählen und die XML einfügen bzw. die Datei hochladen"
+    )
+    positionen: int = Field(description="Positionen in der XML")
+    teile: int = Field(description="Teile in der XML (Summe der Mengen)")
+    ausgelassen: list[str] = Field(
+        description="Farben ohne BrickLink-Farbcode, die nicht in der XML stehen"
+    )
+
+
+# --- Ergebnis --------------------------------------------------------------------------
 
 
 class ResultModel(BaseModel):
@@ -118,6 +316,16 @@ class ResultModel(BaseModel):
     statistik: StatsModel = Field(description="Kennzahlen des Mosaiks")
     anzahl_teile: int = Field(description="Teile laut Teileliste (Summe aller Mengen)")
     palette: list[PaletteColorModel] = Field(description="Verwendete Farben")
+    # Standardwerte: Mosaike aus älteren Versionen haben diese Felder noch nicht
+    teileliste: list[PartsListItemModel] = Field(
+        default=[], description="Teileliste (wie teileliste.csv und die Wanted List)"
+    )
+    preise: PriceSummaryModel | None = Field(
+        default=None, description="Geschätzter Preis nach POST /mosaike/{id}/preise, sonst null"
+    )
+    basis: str | None = Field(
+        default=None, description="Bei bearbeiteten Mosaiken: ID des Mosaiks davor, sonst null"
+    )
     dateien: list[str] = Field(
         description="Dateinamen; herunterladen über /mosaike/{id}/dateien/{name}"
     )
@@ -209,6 +417,7 @@ def form_options(
     part_kinds = tuple(kind.value for kind in MOSAIC_PART_KINDS)
     frame_kinds = config.frame.part_kinds
     max_colors = config.palette.max_colors
+    crop, only = config.mosaic.crop, config.palette.only_color_ids
     return {
         "unterbau": FieldOption(
             label_of(SUBSTRATE_LABELS, config.layout.substrate), tuple(SUBSTRATE_LABELS)
@@ -235,6 +444,24 @@ def form_options(
         ),
         "kontrast": FieldOption(config.mosaic.contrast, minimum=0),
         "saettigung": FieldOption(config.mosaic.saturation, minimum=0),
+        "helligkeit": FieldOption(config.mosaic.brightness, minimum=0),
+        "farbfilter": FieldOption(
+            label_of(COLOR_FILTER_LABELS, config.mosaic.color_filter), tuple(COLOR_FILTER_LABELS)
+        ),
+        "filter_staerke": FieldOption(config.mosaic.filter_strength, minimum=0, maximum=1),
+        "drehen": FieldOption(config.mosaic.rotate, ROTATIONS),
+        "spiegeln": FieldOption(config.mosaic.mirror),
+        "ausschnitt": FieldOption(
+            None if crop is None else ",".join(f"{value:g}" for value in crop)
+        ),
+        "hintergrund": FieldOption(
+            label_of(BACKGROUND_LABELS, config.mosaic.background), tuple(BACKGROUND_LABELS)
+        ),
+        "hintergrundfarbe": FieldOption(config.mosaic.background_color_id),
+        "hintergrund_toleranz": FieldOption(
+            config.mosaic.background_tolerance, minimum=0, maximum=MAX_BACKGROUND_TOLERANCE
+        ),
+        "hintergrund_staerke": FieldOption(config.mosaic.background_amount, minimum=0, maximum=1),
         "teile": FieldOption(
             ",".join(kind.value for kind in config.palette.part_kinds), part_kinds, multiple=True
         ),
@@ -245,6 +472,7 @@ def form_options(
         ),
         "exotische_farben": FieldOption(False),
         "max_farben": FieldOption(max_colors or 0, minimum=0, maximum=MAX_STUDS * MAX_STUDS),
+        "farb_ids": FieldOption(None if only is None else ",".join(map(str, only))),
         "stil": FieldOption(config.shapes.style, method_names.get("Stile", ())),
         "relief": FieldOption(label_of(RELIEF_LABELS, config.relief.mode), tuple(RELIEF_LABELS)),
         "relief_hoehe": FieldOption(config.relief.levels, minimum=1, maximum=MAX_RELIEF_LEVELS),
@@ -255,6 +483,9 @@ def form_options(
             tuple(COLOR_DISTANCE_LABELS),
         ),
         "aufraeumen": FieldOption(config.dithering.despeckle),
+        "glaettung": FieldOption(
+            label_of(SMOOTHING_LABELS, config.dithering.smoothing), tuple(SMOOTHING_LABELS)
+        ),
         "zerlegung": FieldOption(config.tiling.strategy, method_names.get("Zerlegung", ())),
         "ausgaben": FieldOption(
             ",".join(config.outputs), method_names.get("Ausgaben", ()), multiple=True
@@ -263,8 +494,17 @@ def form_options(
     }
 
 
-def options_model(options: Mapping[str, FieldOption]) -> OptionsModel:
-    """Antwort von ``GET /optionen``."""
+def options_model(
+    options: Mapping[str, FieldOption],
+    palettes: tuple[str, ...] = (),
+    presets: tuple[str, ...] = (),
+) -> OptionsModel:
+    """Antwort von ``GET /optionen``; gespeicherte Paletten und Presets als Auswahl."""
+    options = {
+        **options,
+        "palette": FieldOption(None, palettes),
+        "preset": FieldOption(None, presets),
+    }
     fields = {
         name: FieldOptionModel(
             standard=option.default,

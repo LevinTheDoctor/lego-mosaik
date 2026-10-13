@@ -21,11 +21,15 @@ _PIL_RESAMPLING_NAMES: Mapping[Resampling, str] = {
 }
 
 
-def enhance(image: Image.Image, *, contrast: float, saturation: float) -> Image.Image:
-    """Passt Kontrast und Sättigung an. Bei Faktor 1.0 bleibt das Bild unverändert.
+def enhance(
+    image: Image.Image, *, contrast: float, saturation: float, brightness: float = NEUTRAL_FACTOR
+) -> Image.Image:
+    """Passt Helligkeit, Kontrast und Sättigung an. Bei Faktor 1.0 bleibt das Bild unverändert.
 
     Läuft *vor* dem Einpassen, damit der Rand bei ``PAD`` seine exakte Farbe behält.
     """
+    if brightness != NEUTRAL_FACTOR:
+        image = ImageEnhance.Brightness(image).enhance(brightness)
     if contrast != NEUTRAL_FACTOR:
         image = ImageEnhance.Contrast(image).enhance(contrast)
     if saturation != NEUTRAL_FACTOR:
@@ -64,3 +68,15 @@ def fit_image(
         fitted = ImageOps.pad(image, size, method=method, color=pad_color, centering=CENTER)
     logger.info("Bild auf %d × %d Noppen gebracht (%s).", width, height, fit_mode.value)
     return fitted
+
+
+def fit_mask(mask: Image.Image, *, width: int, height: int, fit_mode: FitMode) -> Image.Image:
+    """Bringt eine Graustufen-Maske genauso auf die Mosaikgröße wie ``fit_image`` das Bild.
+
+    Beim Einpassen (``PAD``) zählt der aufgefüllte Rand als Hintergrund (weiß). BOX mittelt:
+    Eine Noppe ist Hintergrund, wenn mindestens die Hälfte ihrer Pixel es ist.
+    """
+    method = Image.Resampling.BOX
+    if fit_mode is FitMode.CROP:
+        return ImageOps.fit(mask, (width, height), method=method, centering=CENTER)
+    return ImageOps.pad(mask, (width, height), method=method, color=255, centering=CENTER)

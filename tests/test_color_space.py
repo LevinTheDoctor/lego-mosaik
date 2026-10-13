@@ -45,3 +45,20 @@ def test_chunking_gives_same_result(monkeypatch: pytest.MonkeyPatch, catalog: Pa
     expected = space.nearest(image, palette_lab)
     monkeypatch.setattr(color_space, "PIXELS_PER_CHUNK", 5)  # viele kleine Blöcke
     assert np.array_equal(space.nearest(image, palette_lab), expected)
+
+
+def test_neutral_gray_avoids_tinted_colors() -> None:
+    # White, Light Bluish Gray, Light Aqua, Black: Grau L 81 liegt am nächsten an Light Aqua
+    palette_lab = rgb_to_lab([[255, 255, 255], [160, 165, 169], [173, 195, 192], [5, 19, 29]])
+    pixels = np.array([[81.0, 0.3, -0.5], [20.0, 0.0, 0.0], [77.0, -9.0, -1.0]])
+    distances = color_distances(pixels[:1], palette_lab, ColorDistance.CIEDE2000)
+    assert distances.argmin() == 2  # ohne Aufschlag: Light Aqua
+    indices = LabColorSpace(ColorDistance.CIEDE2000).nearest(pixels, palette_lab)
+    # Grau → Light Bluish Gray, Dunkelgrau bleibt Black, ein getöntes Pixel bleibt Light Aqua
+    assert indices.tolist() == [1, 3, 2]
+
+
+def test_neutral_penalty_is_zero_for_colored_pixels() -> None:
+    palette_lab = rgb_to_lab([[201, 26, 9], [255, 255, 255]])
+    penalty = color_space.neutral_penalty(rgb_to_lab([[201, 26, 9]]), palette_lab)
+    assert penalty.tolist() == [[0.0, 0.0]]

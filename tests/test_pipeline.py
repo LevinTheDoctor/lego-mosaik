@@ -10,10 +10,19 @@ import pytest
 from conftest import make_pipeline
 from PIL import Image, ImageDraw
 
-from lego_mosaik.config import AppConfig, MosaicOverrides
-from lego_mosaik.domain.errors import ConfigError, DownloadError
+from lego_mosaik.config import AppConfig, MosaicOverrides, OverrideInput, parse_overrides
+from lego_mosaik.domain.editing import FillEdit, StudEdit
+from lego_mosaik.domain.errors import ConfigError, DownloadError, NotFoundError
 from lego_mosaik.domain.layout import frame_mask
-from lego_mosaik.domain.models import ColorCategory, Mosaic, PartKind, ReliefMode, Substrate
+from lego_mosaik.domain.models import (
+    BackgroundMode,
+    ColorCategory,
+    Mosaic,
+    PartKind,
+    ReliefMode,
+    Smoothing,
+    Substrate,
+)
 from lego_mosaik.domain.sections import StepKind, assembly_steps
 from lego_mosaik.pipeline import safe_name
 
@@ -310,6 +319,27 @@ def test_rare_colors_are_merged(pipeline_config: AppConfig, tmp_path: Path) -> N
     assert "Red" in {color.name for color in kept.used_colors()}
 
 
+@pytest.mark.parametrize("style", ["quadrat", "formen"])
+def test_majority_smoothing_avoids_edge_mix_colors(
+    pipeline_config: AppConfig, tmp_path: Path, style: str
+) -> None:
+    # Gelb/Blau-Kante mitten durch eine Noppe (je 2 Pixel): gemittelt eine Mischfarbe
+    pixels = np.full((56, 56, 3), (242, 205, 55), dtype=np.uint8)
+    pixels[:, 30:] = (0, 85, 191)
+    path = tmp_path / "kante.png"
+    Image.fromarray(pixels).save(path)
+    pipeline = make_pipeline(pipeline_config)
+
+    def image_colors(smoothing: Smoothing) -> set[str]:
+        overrides = MosaicOverrides(style=style, smoothing=smoothing, strength=0.0)
+        mosaic = pipeline.preview(path, overrides)
+        inner = ~frame_mask(mosaic.height, mosaic.width, 1)
+        return {mosaic.palette[index].name for index in mosaic.color_grid[inner].tolist()}
+
+    assert image_colors(Smoothing.NONE) - {"Yellow", "Blue"}
+    assert image_colors(Smoothing.MEDIUM) == {"Yellow", "Blue"}
+
+
 def test_color_count_matches_parts_list(pipeline_config: AppConfig, circle_file: Path) -> None:
     result = make_pipeline(pipeline_config).run(circle_file, MosaicOverrides(style="formen"))
     stats = result.stats
@@ -346,3 +376,103 @@ def test_large_plates_are_bonded_across_every_seam(
     assert all(p.bottom_ldu >= 8 for p in mosaic.placements + mosaic.frame)
     steps = [step.kind for step in assembly_steps(mosaic, section_studs=16, rows_per_step=4)]
     assert steps[:2] == [StepKind.SUBSTRATE, StepKind.BOND]
+
+
+# --- Hintergrund, eigene Palette, Bearbeiten --------------------------------------------
+
+
+def _disk_image(path: Path) -> Path:
+    """Weißer Hintergrund mit roter Scheibe in der Mitte (64 × 64)."""
+    image = Image.new("RGB", (64, 64), (255, 255, 255))
+    ImageDraw.Draw(image).ellipse((16, 16, 48, 48), fill=(201, 26, 9))
+    image.save(path)
+    return path
+
+
+def test_background_is_replaced_by_one_lego_color(
+    pipeline_config: AppConfig, tmp_path: Path
+) -> None:
+    image = _disk_image(tmp_path / "scheibe.png")
+    overrides = MosaicOverrides(background=BackgroundMode.REMOVE, background_color_id=1)
+    mosaic = make_pipeline(pipeline_config).preview(image, overrides)
+    assert mosaic.color_at(1, 1).name == "Blue"  # Ecke der Bildfläche (Rahmen = 1)
+    assert mosaic.color_at(8, 8).name == "Red"  # Motiv bleibt
+
+
+def test_background_color_must_exist_as_single_stud(
+    pipeline_config: AppConfig, tmp_path: Path
+) -> None:
+    overrides = MosaicOverrides(background=BackgroundMode.REMOVE, background_color_id=2)
+    with pytest.raises(ConfigError, match="Hintergrundfarbe Green"):
+        make_pipeline(pipeline_config).preview(_disk_image(tmp_path / "s.png"), overrides)
+
+
+def test_relief_subject_uses_detected_background(
+    pipeline_config: AppConfig, tmp_path: Path
+) -> None:
+    overrides = MosaicOverrides(
+        background=BackgroundMode.LIGHTEN, relief=ReliefMode.SUBJECT, relief_levels=1
+    )
+    mosaic = make_pipeline(pipeline_config).preview(_disk_image(tmp_path / "s.png"), overrides)
+
+    def bottom(row: int, col: int) -> int:
+        return next(p.bottom_ldu for p in mosaic.placements if (row, col) in set(p.cells()))
+
+    assert mosaic.relief  # Stützteile unter dem Motiv
+    assert bottom(8, 8) > bottom(1, 1)  # Motiv höher als der (aufgehellte) Hintergrund
+
+
+def test_only_color_ids_restrict_the_palette(pipeline_config: AppConfig, image_file: Path) -> None:
+    overrides = MosaicOverrides(only_color_ids=(0, 15))
+    mosaic = make_pipeline(pipeline_config).preview(image_file, overrides)
+    assert {color.id for color in mosaic.used_colors()} <= {0, 15}
+
+
+def test_run_keeps_source_and_edit_creates_a_new_mosaic(
+    pipeline_config: AppConfig, image_file: Path
+) -> None:
+    pipeline = make_pipeline(pipeline_config)
+    inputs = OverrideInput(frame_width=2)
+    first = pipeline.run(image_file, parse_overrides(inputs), title="bild", inputs=inputs)
+    assert (first.target_dir / "original.png").read_bytes() == image_file.read_bytes()
+    saved = json.loads((first.target_dir / "eingaben.json").read_text(encoding="utf-8"))
+    assert saved["eingaben"]["frame_width"] == 2 and saved["aenderungen"] == []
+    assert pipeline.inputs_of(first.target_dir).frame_width == 2
+
+    second = pipeline.edit(first.target_dir, [StudEdit(3, 3, 15), FillEdit(14, 14, 4)])
+    assert second.id != first.id and second.mosaic.width == first.mosaic.width
+    assert second.mosaic.color_at(2, 2).name == "White"
+    result = json.loads((second.target_dir / "ergebnis.json").read_text(encoding="utf-8"))
+    assert result["basis"] == first.id
+    third = pipeline.edit(second.target_dir, [StudEdit(4, 4, 0)])
+    saved = json.loads((third.target_dir / "eingaben.json").read_text(encoding="utf-8"))
+    assert len(saved["aenderungen"]) == 3  # Änderungen sammeln sich
+    assert third.mosaic.color_at(2, 2).name == "White"
+
+
+def test_edit_needs_saved_inputs(pipeline_config: AppConfig, image_file: Path) -> None:
+    config = dataclasses.replace(
+        pipeline_config, storage=dataclasses.replace(pipeline_config.storage, keep_source=False)
+    )
+    result = make_pipeline(config).run(image_file)
+    assert not (result.target_dir / "eingaben.json").exists()
+    with pytest.raises(NotFoundError, match="ohne Originalbild"):
+        make_pipeline(config).edit(result.target_dir, [StudEdit(2, 2, 0)])
+
+
+def test_detect_background_suggests_a_palette_color(
+    pipeline_config: AppConfig, tmp_path: Path
+) -> None:
+    result = make_pipeline(pipeline_config).detect_background(
+        _disk_image(tmp_path / "s.png"), max_px=32
+    )
+    assert result.report.color == (255, 255, 255)
+    assert result.lego_color.name == "White"
+    assert result.report.mask_png.startswith(b"\x89PNG")
+
+
+def test_colors_reject_unknown_ids(pipeline_config: AppConfig) -> None:
+    pipeline = make_pipeline(pipeline_config)
+    assert [c.name for c in pipeline.colors([0, 15])] == ["Black", "White"]
+    with pytest.raises(ConfigError, match="Unbekannte Farb-IDs: 999"):
+        pipeline.colors([0, 999])

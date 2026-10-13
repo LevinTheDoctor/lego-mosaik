@@ -18,6 +18,16 @@ RGB_MAX = 255.0
 # Höchstzahl Pixel pro Block bei der vektorisierten Suche; begrenzt den
 # Speicherbedarf der (Pixel × Palette)-Zwischenarrays bei großen Mosaiken
 PIXELS_PER_CHUNK = 8192
+# Neutrale Grautöne bleiben neutral: Ein Grau zwischen zwei Graustufen der Palette liegt
+# oft näher an einer leicht getönten Farbe (Grau L 81 → Light Aqua statt Light Bluish Gray).
+# Fast farblose Pixel bekommen deshalb einen Aufschlag für jede Buntheit (Chroma), die eine
+# Palettenfarbe mitbringt. Der Aufschlag wächst mit der Helligkeit der Palettenfarbe, weil
+# Buntheit in dunklen Farben kaum auffällt (Black hat Chroma 8,5 bei L 5).
+NEUTRAL_CHROMA = 3.0  # bis zu diesem Chroma gilt ein Pixel voll als neutral …
+TINTED_CHROMA = 10.0  # … ab diesem gar nicht mehr (dazwischen linear)
+CHROMA_SLACK = 3.0  # so viel zusätzliches Chroma ist frei
+NEUTRAL_WEIGHT = 2.0  # Aufschlag pro Chroma-Einheit (bei L = 100)
+L_MAX = 100.0
 
 
 def rgb_to_lab(rgb: npt.ArrayLike) -> FloatImage:
@@ -59,6 +69,27 @@ def color_distances(
     return np.asarray(np.linalg.norm(left - right, axis=-1), dtype=np.float64)
 
 
+def neutral_penalty(pixels_lab: FloatImage, palette_lab: FloatImage) -> FloatImage:
+    """Aufschlag auf den Farbabstand, wenn ein neutrales Pixel eine getönte Farbe bekäme.
+
+    Args:
+        pixels_lab: N×3-Array von Lab-Werten.
+        palette_lab: P×3-Array von Lab-Werten.
+
+    Returns:
+        N×P-Array; 0 für bunte Pixel und für Palettenfarben ohne zusätzliches Chroma.
+    """
+    # Chroma = Abstand von der Grauachse in der a-b-Ebene
+    pixel_chroma = np.hypot(pixels_lab[:, 1], pixels_lab[:, 2])
+    palette_chroma = np.hypot(palette_lab[:, 1], palette_lab[:, 2])
+    neutral = np.clip((TINTED_CHROMA - pixel_chroma) / (TINTED_CHROMA - NEUTRAL_CHROMA), 0.0, 1.0)
+    extra = np.maximum(
+        0.0, palette_chroma[np.newaxis, :] - pixel_chroma[:, np.newaxis] - CHROMA_SLACK
+    )
+    lightness = np.clip(palette_lab[:, 0], 0.0, L_MAX) / L_MAX
+    return np.asarray(NEUTRAL_WEIGHT * extra * lightness * neutral[:, np.newaxis])
+
+
 class LabColorSpace:
     """Farbsuche und Umrechnung mit wählbarem Farbabstand.
 
@@ -76,6 +107,7 @@ class LabColorSpace:
     def nearest(self, pixels_lab: FloatImage, palette_lab: FloatImage) -> IndexGrid:
         """Index der nächsten Palettenfarbe für Lab-Werte beliebiger Form ``(..., 3)``.
 
+        Fast neutrale Pixel bevorzugen neutrale Farben (``neutral_penalty``).
         Gerechnet wird blockweise (``PIXELS_PER_CHUNK``), damit große Mosaike mit
         CIEDE2000 nicht Gigabytes an Zwischenspeicher brauchen.
 
@@ -88,10 +120,15 @@ class LabColorSpace:
         for start in range(0, len(pixels), PIXELS_PER_CHUNK):
             chunk = pixels[start : start + PIXELS_PER_CHUNK]
             distances = color_distances(chunk, palette_lab, self.distance)
+            distances += neutral_penalty(chunk, palette_lab)
             # argmin(axis=1): pro Zeile (Pixel) der Index der kleinsten Distanz
             indices[start : start + len(chunk)] = distances.argmin(axis=1)
         # shape[:-1]: alle Achsen außer der letzten (den drei Lab-Kanälen)
         return indices.reshape(pixels_lab.shape[:-1])
+
+    def distances(self, left_lab: FloatImage, right_lab: FloatImage) -> FloatImage:
+        """N×M-Tabelle der Farbabstände (gewählte Formel, ohne Neutral-Aufschlag)."""
+        return color_distances(left_lab, right_lab, self.distance)
 
     def to_rgb(self, lab: FloatImage) -> FloatImage:
         """Lab → RGB (0.0–255.0)."""

@@ -35,6 +35,7 @@ lazy from lego_mosaik.outputs.official_parts_lists import OfficialPartsListsWrit
 lazy from lego_mosaik.outputs.parts_list_csv import PartsListCsvWriter
 lazy from lego_mosaik.outputs.preview_png import PreviewPngWriter
 lazy from lego_mosaik.outputs.protocol import OutputWriter
+lazy from lego_mosaik.outputs.raster_json import RasterJsonWriter
 lazy from lego_mosaik.outputs.result_json import ResultJsonWriter
 lazy from lego_mosaik.shaping.contour import ContourShaper
 lazy from lego_mosaik.shaping.dots import DotShaper
@@ -109,7 +110,7 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
         connector_depth_ldu=config.layout.connector_depth_ldu,
     ),
     "parts_list_csv": lambda config: PartsListCsvWriter(),
-    "official_parts_lists": lambda config: OfficialPartsListsWriter(),
+    "official_parts_lists": lambda config: OfficialPartsListsWriter(config.pricing.condition),
     "instructions_png": lambda config: InstructionsWriter(
         PageLayout(
             width=config.instructions.page_width_px,
@@ -128,6 +129,7 @@ OUTPUT_WRITERS: dict[str, OutputWriterFactory] = {
             bold_font_paths=config.instructions.bold_font_paths,
         )
     ),
+    "raster_json": lambda config: RasterJsonWriter(config.frame.width),
     "result_json": lambda config: ResultJsonWriter(),
 }
 

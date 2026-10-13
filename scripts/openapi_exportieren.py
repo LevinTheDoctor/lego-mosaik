@@ -12,14 +12,16 @@ dass die eingecheckte Datei aktuell ist.
 from pathlib import Path
 
 from lego_mosaik.interfaces.api import create_app, openapi_yaml
-from lego_mosaik.main import CONFIG, build_pipeline
+from lego_mosaik.main import CONFIG, build_pipeline, build_price_service
 
 TARGET = Path(__file__).parent.parent / "openapi.yaml"
 
 
 def main() -> None:
     """Erzeugt die App (ohne Server zu starten) und schreibt ihre Beschreibung."""
-    TARGET.write_text(openapi_yaml(create_app(CONFIG, build_pipeline)), encoding="utf-8")
+    TARGET.write_text(
+        openapi_yaml(create_app(CONFIG, build_pipeline, build_price_service)), encoding="utf-8"
+    )
     print(f"OpenAPI-Beschreibung geschrieben: {TARGET}")
 
 

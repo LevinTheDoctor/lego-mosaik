@@ -25,6 +25,7 @@ def build_palette(
     categories: Iterable[ColorCategory] = (ColorCategory.SOLID,),
     include_color_ids: Iterable[int] = (),
     exclude_color_ids: Iterable[int] = (),
+    only_color_ids: Iterable[int] | None = None,
 ) -> tuple[LegoColor, ...]:
     """Bestimmt alle Farben, die als Mosaikpixel taugen.
 
@@ -42,6 +43,8 @@ def build_palette(
         categories: Erlaubte Farbkategorien (Standard: nur Solid).
         include_color_ids: Farb-IDs, die unabhängig von der Kategorie erlaubt sind.
         exclude_color_ids: Farb-IDs, die nie verwendet werden sollen (hat Vorrang).
+        only_color_ids: Eigene Palette: nur diese Farben, unabhängig von der Kategorie
+            (sofern es ein 1×1-Teil gibt); ``None`` = keine Einschränkung.
 
     Returns:
         Die Palette, sortiert nach Rebrickable-ID (deterministisch).
@@ -51,11 +54,18 @@ def build_palette(
     kinds = tuple(part_kinds)
     allowed_categories, included = frozenset(categories), frozenset(include_color_ids)
     excluded = SPECIAL_COLOR_IDS | frozenset(exclude_color_ids)  # | = Vereinigung zweier Mengen
+    only = None if only_color_ids is None else frozenset(only_color_ids)
+
+    def chosen(color: LegoColor) -> bool:
+        if only is not None:  # eigene Palette ersetzt die Kategorien
+            return color.id in only
+        return color.category in allowed_categories or color.id in included
+
     palette = [
         color
         for color in catalog.colors.values()
         if color.id not in excluded
-        and (color.category in allowed_categories or color.id in included)
+        and chosen(color)
         and color.ldraw_code is not None
         and _has_single_stud_part(catalog, color.id, kinds)
     ]

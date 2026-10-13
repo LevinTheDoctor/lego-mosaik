@@ -48,7 +48,8 @@ def test_bricklink_xml(mosaic: Mosaic, tmp_path: Path) -> None:
     root = ElementTree.parse(tmp_path / "teileliste_bricklink.xml").getroot()
     items = [{child.tag: child.text for child in item} for item in root.iter("ITEM")]
     assert root.tag == "INVENTORY"
-    assert {"ITEMTYPE": "P", "ITEMID": "3070", "COLOR": "11", "MINQTY": "2"} in items
+    black_tiles = {"ITEMTYPE": "P", "ITEMID": "3070", "COLOR": "11", "MINQTY": "2"}
+    assert black_tiles | {"CONDITION": "N"} in items  # ohne Preise: kein MAXPRICE
     assert items[0]["COLOR"] == "1"  # nach Farbfamilien: Weiß vor Schwarz
     assert sum(int(item["MINQTY"] or 0) for item in items) == len(mosaic.placements)
 
@@ -75,3 +76,9 @@ def test_lego_list_uses_official_names(mosaic: Mosaic, tmp_path: Path) -> None:
     assert [row["Design-ID"] for row in black_tiles] == ["3070"]
     assert black_tiles[0]["Element-ID"] != ""
     assert sum(int(row["Anzahl"]) for row in rows) == len(mosaic.placements)
+
+
+def test_bricklink_xml_condition_used(mosaic: Mosaic, tmp_path: Path) -> None:
+    OfficialPartsListsWriter(condition="U").write(mosaic, tmp_path)
+    root = ElementTree.parse(tmp_path / "teileliste_bricklink.xml").getroot()
+    assert {item.findtext("CONDITION") for item in root.iter("ITEM")} == {"U"}

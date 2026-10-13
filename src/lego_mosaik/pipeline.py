@@ -6,6 +6,7 @@ dahinterstecken, entscheidet ``main.py`` (Composition Root) über die
 Dithering-Verfahren oder eine PostgreSQL-Quelle dazukommt.
 """
 
+import json
 import logging
 import math
 import re
@@ -22,14 +23,23 @@ lazy import numpy.typing as npt
 from lego_mosaik.config import (
     AppConfig,
     MosaicOverrides,
+    OverrideInput,
     apply_overrides,
     config_to_dict,
     frame_part_kinds,
+    parse_overrides,
     relief_color_id,
     substrate_color_id,
 )
-from lego_mosaik.domain.cleanup import rare_colors, remove_isolated
-from lego_mosaik.domain.errors import ConfigError
+from lego_mosaik.domain.cleanup import (
+    majority_colors,
+    majority_filter,
+    merge_small_regions,
+    rare_colors,
+    remove_isolated,
+)
+from lego_mosaik.domain.editing import GridEdit, apply_edits, edit_from_json, edit_to_json
+from lego_mosaik.domain.errors import ConfigError, NotFoundError
 from lego_mosaik.domain.layout import (
     BOND_PART_STUDS,
     LayoutSize,
@@ -49,7 +59,10 @@ from lego_mosaik.domain.layout import (
 from lego_mosaik.domain.models import (
     EMPTY_CELL,
     PLATE_HEIGHT_LDU,
+    SMOOTHING_LEVELS,
     SUBSTRATE_PART_KINDS,
+    BackgroundMode,
+    BoolGrid,
     FloatImage,
     IndexGrid,
     LegoColor,
@@ -59,6 +72,7 @@ from lego_mosaik.domain.models import (
     PartType,
     Placement,
     ReliefMode,
+    RgbTuple,
     Substrate,
     TilingStats,
 )
@@ -66,7 +80,12 @@ from lego_mosaik.domain.palette import build_palette, most_used_colors
 from lego_mosaik.domain.relief import relief_levels
 from lego_mosaik.domain.sections import split_sections
 lazy from lego_mosaik.dithering.protocol import ColorSpace, Ditherer
-lazy from lego_mosaik.imaging.protocol import ImageInfo, ImagePreparer, RgbImage
+lazy from lego_mosaik.imaging.protocol import (
+    BackgroundReport,
+    ImageInfo,
+    ImagePreparer,
+    RgbImage,
+)
 lazy from lego_mosaik.outputs.protocol import OutputWriter
 lazy from lego_mosaik.shaping.protocol import ShapeRefiner, ShapeResult
 lazy from lego_mosaik.sources.protocol import (
@@ -91,7 +110,27 @@ UMLAUTS = str.maketrans(
     {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}
 )
 
+# Was jeder Lauf zusätzlich aufhebt, damit man das Mosaik später bearbeiten kann
+INPUTS_FILE = "eingaben.json"
+SOURCE_STEM = "original"
+INPUTS_VERSION = 1
+# Pillow-Format → Dateiendung des gespeicherten Originalbilds
+IMAGE_SUFFIXES = {"JPEG": ".jpg", "MPO": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif"}
+
 type StepCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundResult:
+    """Erkannter Hintergrund eines Bilds plus die nächste LEGO-Farbe aus der Palette.
+
+    Attributes:
+        report: Farbe, Anteil und Maske (PNG) aus der Bildaufbereitung.
+        lego_color: Nächste Palettenfarbe zur Hintergrundfarbe (Vorschlag für „entfernen“).
+    """
+
+    report: BackgroundReport
+    lego_color: LegoColor
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +261,60 @@ class MosaicPipeline:
         """
         return self._component_factory(self.config).image_preparer.inspect(image)
 
+    def check(self, overrides: MosaicOverrides) -> AppConfig:
+        """Prüft Overrides vollständig (auch Registry-Namen), ohne ein Bild zu brauchen.
+
+        Raises:
+            ConfigError: Bei ungültigen Werten.
+        """
+        run_config = apply_overrides(self.config, overrides)
+        self._component_factory(run_config)  # löst Dithering, Stil, Ausgaben usw. auf
+        return run_config
+
+    def colors(self, color_ids: Iterable[int]) -> tuple[LegoColor, ...]:
+        """Farben zu Rebrickable-IDs (z. B. für eine eigene Palette).
+
+        Raises:
+            ConfigError: Bei unbekannten IDs.
+        """
+        known = self.load_catalog().colors
+        unknown = [
+            str(cid) for cid in color_ids if cid not in known or known[cid].ldraw_code is None
+        ]
+        if unknown:
+            raise ConfigError(f"Unbekannte Farb-IDs: {', '.join(unknown)} (siehe „farben“).")
+        return tuple(known[cid] for cid in color_ids)
+
+    def edited_image(
+        self, image: Path | bytes, overrides: MosaicOverrides | None = None, *, max_px: int
+    ) -> bytes:
+        """Das bearbeitete Bild vor dem Mosaik (Filter, Ausschnitt, Hintergrund) als PNG."""
+        run_config = apply_overrides(self.config, overrides or MosaicOverrides())
+        catalog = self.load_catalog(run_config)
+        pad = _pad_color(catalog, run_config)
+        background = _background_color(catalog, run_config, None) or pad
+        return self._component_factory(run_config).image_preparer.edited(
+            image, max_px=max_px, pad_color=pad.rgb, background_color=background.rgb
+        )
+
+    def detect_background(
+        self, image: Path | bytes, overrides: MosaicOverrides | None = None, *, max_px: int
+    ) -> BackgroundResult:
+        """Erkennt den Hintergrund und schlägt die nächste LEGO-Farbe der Palette vor."""
+        run_config = apply_overrides(self.config, overrides or MosaicOverrides())
+        components = self._component_factory(run_config)
+        catalog = self.load_catalog(run_config)
+        report = components.image_preparer.detect_background(
+            image, pad_color=_pad_color(catalog, run_config).rgb, max_px=max_px
+        )
+        palette = _palette(catalog, run_config, components.shaper)
+        to_lab = components.color_space.to_lab
+        target = to_lab(np.array([report.color], dtype=np.float64))[0]
+        distances = np.linalg.norm(
+            to_lab(np.array([c.rgb for c in palette], dtype=np.float64)) - target, axis=-1
+        )
+        return BackgroundResult(report, palette[int(distances.argmin())])
+
     # --- Mosaik erzeugen -------------------------------------------------------
 
     def preview(
@@ -246,6 +339,9 @@ class MosaicPipeline:
         *,
         title: str = DEFAULT_TITLE,
         on_step: StepCallback | None = None,
+        edits: Sequence[GridEdit] = (),
+        inputs: OverrideInput | None = None,
+        base: str | None = None,
     ) -> MosaicResult:
         """Erzeugt ein Mosaik und alle konfigurierten Ausgaben.
 
@@ -254,17 +350,79 @@ class MosaicPipeline:
             overrides: Werte, die nur für diesen Lauf gelten.
             title: Titel des Mosaiks (z. B. Dateiname ohne Endung).
             on_step: Wird zu Beginn jedes Schritts mit dessen deutscher Bezeichnung aufgerufen.
+            edits: Umgefärbte Noppen und Flächen (siehe ``domain/editing.py``).
+            inputs: Die rohen Eingaben hinter ``overrides``; mit ``storage.keep_source``
+                landen sie samt Originalbild im Ordner, damit ``edit`` neu rechnen kann.
+            base: ID des Mosaiks, aus dem dieses durch Bearbeiten entstanden ist.
 
         Raises:
             LegoMosaicError: Bei ungültiger Eingabe oder Verarbeitungsfehlern.
         """
         timer = _Timer(on_step)
-        build = self._build(image, overrides, title, timer)
+        build = self._build(image, overrides, title, timer, edits)
+        if base is not None:
+            mosaic = replace(build.mosaic, metadata={**build.mosaic.metadata, "basis": base})
+            build = replace(build, mosaic=mosaic)
         target_dir = self._create_target_dir(build.config.output_dir, title)
         with timer.step("Ausgaben schreiben"):
+            if build.config.storage.keep_source:
+                image_format = build.components.image_preparer.inspect(image).format
+                _keep_source(target_dir, image, image_format, inputs, title, edits, base)
             files = _write_outputs(build.components.writers, build.mosaic, target_dir)
         build.stats["dauer_sekunden"] = dict(timer.durations)
         return MosaicResult(target_dir.name, build.mosaic, target_dir, files, build.stats)
+
+    def edit(
+        self,
+        directory: Path,
+        edits: Sequence[GridEdit],
+        *,
+        required_outputs: Sequence[str] = (),
+        on_step: StepCallback | None = None,
+    ) -> MosaicResult:
+        """Rechnet ein gespeichertes Mosaik mit weiteren Änderungen neu (neuer Ordner, neue ID).
+
+        Das alte Mosaik bleibt unverändert. Änderungen sammeln sich: Das neue Mosaik kennt
+        alle bisherigen plus ``edits``, kann also selbst wieder bearbeitet werden.
+
+        Args:
+            directory: Ordner des Mosaiks (mit ``eingaben.json`` und Originalbild).
+            edits: Neue Änderungen.
+            required_outputs: Ausgaben, die auf jeden Fall entstehen (z. B. für die API).
+            on_step: Fortschritt wie bei ``run``.
+
+        Raises:
+            NotFoundError: Wenn Originalbild oder Eingaben fehlen.
+            ConfigError: Bei ungültigen Änderungen.
+        """
+        saved = _read_inputs(directory)
+        source = directory / str(saved["bild"])
+        if not source.is_file():
+            raise NotFoundError(f"Das Originalbild von „{directory.name}“ fehlt.")
+        raw = _saved_input(saved)
+        overrides = replace(parse_overrides(raw), output_dir=directory.parent)
+        if required_outputs:
+            outputs = overrides.outputs or self.config.outputs
+            missing = tuple(name for name in required_outputs if name not in outputs)
+            overrides = replace(overrides, outputs=(*outputs, *missing))
+        previous = [edit_from_json(item) for item in _items(saved.get("aenderungen", []))]
+        return self.run(
+            source.read_bytes(),
+            overrides,
+            title=str(saved["titel"]),
+            on_step=on_step,
+            edits=[*previous, *edits],
+            inputs=raw,
+            base=directory.name,
+        )
+
+    def inputs_of(self, directory: Path) -> OverrideInput:
+        """Die Eingaben, mit denen ein gespeichertes Mosaik erzeugt wurde.
+
+        Raises:
+            NotFoundError: Wenn das Mosaik ohne Eingaben gespeichert wurde.
+        """
+        return _saved_input(_read_inputs(directory))
 
     def _build(
         self,
@@ -272,6 +430,7 @@ class MosaicPipeline:
         overrides: MosaicOverrides | None,
         title: str,
         timer: _Timer,
+        edits: Sequence[GridEdit] = (),
     ) -> _Build:
         """Alle Rechenschritte bis zum fertigen Mosaik (ohne Dateien)."""
         run_config = apply_overrides(self.config, overrides or MosaicOverrides())
@@ -279,18 +438,36 @@ class MosaicPipeline:
         with timer.step("Teilekatalog laden"):
             catalog = self.load_catalog(run_config)
             palette = _palette(catalog, run_config, components.shaper)
-            materials = _Materials.resolve(catalog, run_config)
+            materials = _Materials.resolve(catalog, run_config, components.shaper)
         with timer.step("Bild laden und einpassen"):
             size = _layout_size(run_config, components.image_preparer, image)
-            rgb = components.image_preparer.prepare(
+            prepared = components.image_preparer.prepare(
                 image,
                 width=size.image_width,
                 height=size.image_height,
                 pad_color=materials.pad_color.rgb,
+                background_color=materials.background_rgb,
             )
             detail = _detail_image(components, image, size, materials, run_config.frame.width)
+            fine = _fine_image(components, image, size, materials, detail, run_config)
         with timer.step("Dithering"):
-            grid, palette = _dither(components, rgb, palette, run_config)
+            grid, palette = _dither(components, prepared.rgb, fine, palette, run_config)
+            fixed = np.zeros(grid.shape, dtype=bool)  # Zellen mit fester Farbe (für die Formwahl)
+            if materials.background_color is not None and prepared.background is not None:
+                grid, palette = _fill(
+                    grid, palette, prepared.background, materials.background_color
+                )
+                fixed |= prepared.background
+            if edits:
+                grid, palette, changed = apply_edits(
+                    grid,
+                    palette,
+                    edits,
+                    {color.id: color for color in materials.allowed},
+                    frame_width=run_config.frame.width,
+                )
+                fixed |= changed
+            detail = _flatten_detail(components, detail, grid, palette, fixed, run_config)
             grid, palette = apply_frame(
                 grid,
                 palette,
@@ -306,6 +483,7 @@ class MosaicPipeline:
                 palette,
                 run_config.relief.mode,
                 run_config.relief.levels,
+                _framed(prepared.background, run_config.frame.width),
             )
             shaped = _shape_sections(
                 components,
@@ -382,14 +560,22 @@ class _Materials:
     connector: tuple[PartType, LegoColor] | None
     relief_color: LegoColor | None  # Farbe der Stützlagen unter erhöhten Bildteilen
     bond_color: LegoColor | None  # Farbe der Verbindungslage über großen Platten
+    # Farben, die Bearbeiten und Hintergrund einsetzen dürfen (ohne eigene Palette)
+    allowed: tuple[LegoColor, ...]
+    background_color: LegoColor | None  # neue Farbe des Hintergrunds bei „entfernen“
 
     @property
     def ground_color(self) -> LegoColor | None:
         """Was in den Lücken der Formteile auf Höhe 0 zu sehen ist (der Unterbau, sonst None)."""
         return self.substrate[1] if self.substrate else None
 
+    @property
+    def background_rgb(self) -> RgbTuple | None:
+        """RGB der Hintergrundfarbe für die Bildaufbereitung (sonst die Randfarbe)."""
+        return None if self.background_color is None else self.background_color.rgb
+
     @classmethod
-    def resolve(cls, catalog: PartCatalog, config: AppConfig) -> _Materials:
+    def resolve(cls, catalog: PartCatalog, config: AppConfig, shaper: ShapeRefiner) -> _Materials:
         """Prüft Rahmen-, Ecken-, Rand- und Unterbaufarben (deutsche Fehlermeldungen)."""
         frame, kinds = config.frame, frame_part_kinds(config)
         frame_color = require_single_stud_color(catalog, frame.color_id, kinds, "Rahmenfarbe")
@@ -402,9 +588,10 @@ class _Materials:
             corner_color = require_single_stud_color(
                 catalog, frame.corner_color_id, kinds, "Eckenfarbe"
             )
-        pad_color = catalog.colors.get(config.mosaic.pad_color_id)
-        if pad_color is None:
-            raise ConfigError(f"Die Randfarbe {config.mosaic.pad_color_id} ist unbekannt.")
+        pad_color = _pad_color(catalog, config)
+        unrestricted = replace(config, palette=replace(config.palette, only_color_ids=None))
+        allowed = _palette(catalog, unrestricted, shaper)
+        background_color = _background_color(catalog, config, allowed)
         substrate, connector = _substrate_materials(catalog, config)
         bond_color = None
         if config.layout.substrate is Substrate.PLATES:  # wie der Unterbau, in Plates
@@ -417,8 +604,161 @@ class _Materials:
                 catalog, relief_color_id(config), (PartKind.PLATE,), "Farbe der Relief-Stützlagen"
             )
         return cls(
-            frame_color, corner_color, pad_color, substrate, connector, relief_color, bond_color
+            frame_color,
+            corner_color,
+            pad_color,
+            substrate,
+            connector,
+            relief_color,
+            bond_color,
+            allowed,
+            background_color,
         )
+
+
+def _pad_color(catalog: PartCatalog, config: AppConfig) -> LegoColor:
+    """Randfarbe beim Einpassen und für Transparenz."""
+    pad_color = catalog.colors.get(config.mosaic.pad_color_id)
+    if pad_color is None:
+        raise ConfigError(f"Die Randfarbe {config.mosaic.pad_color_id} ist unbekannt.")
+    return pad_color
+
+
+def _background_color(
+    catalog: PartCatalog, config: AppConfig, allowed: Sequence[LegoColor] | None
+) -> LegoColor | None:
+    """Neue Hintergrundfarbe bei „entfernen“ (sonst ``None``), gegen ``allowed`` geprüft.
+
+    Ohne Angabe gilt die Randfarbe. ``allowed=None`` prüft nur, dass es die Farbe gibt.
+    """
+    mosaic = config.mosaic
+    if mosaic.background is not BackgroundMode.REMOVE:
+        return None
+    color_id = (
+        mosaic.pad_color_id if mosaic.background_color_id is None else mosaic.background_color_id
+    )
+    color = catalog.colors.get(color_id)
+    if color is None:
+        raise ConfigError(f"Die Hintergrundfarbe {color_id} ist unbekannt.")
+    if allowed is not None and color not in allowed:
+        raise ConfigError(
+            f"Die Hintergrundfarbe {color.name} gibt es nicht als 1×1-Teil der gewählten "
+            "Teilarten und des Stils."
+        )
+    return color
+
+
+def _fill(
+    grid: IndexGrid, palette: tuple[LegoColor, ...], mask: BoolGrid, color: LegoColor
+) -> tuple[IndexGrid, tuple[LegoColor, ...]]:
+    """Setzt alle Zellen der Maske auf eine Farbe (ggf. neu in der Palette)."""
+    if color not in palette:
+        palette = (*palette, color)
+    return np.where(mask, palette.index(color), grid).astype(np.intp), palette
+
+
+def _flatten_detail(
+    components: PipelineComponents,
+    detail: FloatImage | None,
+    grid: IndexGrid,
+    palette: tuple[LegoColor, ...],
+    fixed: BoolGrid,
+    config: AppConfig,
+) -> FloatImage | None:
+    """Macht das Detailbild der Formwahl dort einfarbig, wo die Farbe fest vorgegeben ist.
+
+    Sonst würde die Formwahl an umgefärbten Noppen nach dem alten Bild Rundungen setzen.
+    """
+    if detail is None or not fixed.any():
+        return detail
+    s = components.shaper.subsample
+    border = config.frame.width * s
+    lab = components.color_space.to_lab(np.array([c.rgb for c in palette], dtype=np.float64))
+    # np.kron vergrößert die Maske: jede Noppe wird zu s × s Teilpixeln
+    fine = np.kron(fixed, np.ones((s, s), dtype=bool)).astype(bool)
+    colors = lab[np.kron(grid, np.ones((s, s), dtype=np.intp))]
+    result = detail.copy()
+    inner = result[border : border + fine.shape[0], border : border + fine.shape[1]]
+    inner[fine] = colors[fine]
+    return result
+
+
+def _framed(mask: BoolGrid | None, frame_width: int) -> BoolGrid | None:
+    """Maske der Bildfläche auf die ganze Mosaikfläche erweitern (Rahmen = kein Hintergrund)."""
+    if mask is None:
+        return None
+    return np.pad(mask, frame_width, constant_values=False)
+
+
+def _keep_source(
+    target_dir: Path,
+    image: Path | bytes,
+    image_format: str | None,
+    inputs: OverrideInput | None,
+    title: str,
+    edits: Sequence[GridEdit],
+    base: str | None,
+) -> None:
+    """Speichert Originalbild und Eingaben im Mosaik-Ordner (für ``edit`` und Presets)."""
+    data = image.read_bytes() if isinstance(image, Path) else image
+    suffix = _image_suffix(image_format)
+    (target_dir / f"{SOURCE_STEM}{suffix}").write_bytes(data)
+    raw = asdict(inputs or OverrideInput())
+    raw["output_dir"] = None  # Ordner gehört nicht zu den Einstellungen des Bilds
+    saved = {
+        "version": INPUTS_VERSION,
+        "titel": title,
+        "bild": f"{SOURCE_STEM}{suffix}",
+        "basis": base,
+        "eingaben": raw,
+        "aenderungen": [edit_to_json(edit) for edit in edits],
+    }
+    text = json.dumps(saved, ensure_ascii=False, indent=2) + "\n"
+    (target_dir / INPUTS_FILE).write_text(text, encoding="utf-8")
+
+
+def _image_suffix(image_format: str | None) -> str:
+    """Dateiendung nach dem Bildformat laut Pillow (z. B. „JPEG“ → „.jpg“)."""
+    if not image_format:
+        return ".bild"
+    return IMAGE_SUFFIXES.get(image_format, f".{image_format.lower()}")
+
+
+def _read_inputs(directory: Path) -> dict[str, object]:
+    """Inhalt von ``eingaben.json`` eines Mosaiks.
+
+    Raises:
+        NotFoundError: Wenn das Mosaik ohne Eingaben gespeichert wurde.
+    """
+    path = directory / INPUTS_FILE
+    if not path.is_file():
+        raise NotFoundError(
+            f"„{directory.name}“ wurde ohne Originalbild gespeichert und lässt sich nicht "
+            "bearbeiten (storage.keep_source)."
+        )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path} ist beschädigt.")
+    return data
+
+
+def _saved_input(saved: Mapping[str, object]) -> OverrideInput:
+    """Die gespeicherten Eingaben aus ``eingaben.json`` als ``OverrideInput``."""
+    raw = saved.get("eingaben")
+    if not isinstance(raw, dict):
+        raise ConfigError("eingaben.json enthält keine Eingaben.")
+    known = {
+        name: value for name, value in raw.items() if name in OverrideInput.__dataclass_fields__
+    }
+    known["output_dir"] = None
+    return OverrideInput(**known)
+
+
+def _items(value: object) -> list[Mapping[str, object]]:
+    """Liste von dicts aus JSON (alles andere ist ein Fehler)."""
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ConfigError("Die gespeicherten Änderungen sind beschädigt.")
+    return value
 
 
 def _substrate_materials(
@@ -610,7 +950,8 @@ def _detail_image(
         width=size.image_width * s,
         height=size.image_height * s,
         pad_color=materials.pad_color.rgb,
-    )
+        background_color=materials.background_rgb,
+    ).rgb
     lab = components.color_space.to_lab(rgb.astype(np.float64))
     border = frame_width * s
     # np.pad: auf allen Seiten ``border`` Zeilen/Spalten mit 0 anhängen (nur Höhe und Breite)
@@ -797,32 +1138,77 @@ def _palette(
         categories=config.palette.color_categories,
         include_color_ids=config.palette.include_color_ids,
         exclude_color_ids=config.palette.exclude_color_ids,
+        only_color_ids=config.palette.only_color_ids,
     )
     palette = tuple(color for color in palette if shaper.accepts(color, catalog))
     if not palette:
         raise ConfigError(
             "Mit den gewählten Teilarten und Farbkategorien bleibt keine Farbe übrig."
         )
+    if config.palette.only_color_ids is not None:
+        missing = sorted(set(config.palette.only_color_ids) - {color.id for color in palette})
+        if missing:  # nicht schlimm: Die Palette funktioniert mit den übrigen Farben
+            logger.warning(
+                "Farben %s der eigenen Palette gibt es nicht als 1×1-Teil für Teilarten und "
+                "Stil; sie fehlen im Bild.",
+                ", ".join(map(str, missing)),
+            )
     return palette
 
 
 MAX_RARE_COLOR_PASSES = 4  # so oft wird höchstens ohne seltene Farben neu gedithert
+MAJORITY_SUBSAMPLE = 4  # Teilpixel pro Noppe und Richtung für die Mehrheitsfarbe
+
+
+def _fine_image(
+    components: PipelineComponents,
+    image: Path | bytes,
+    size: LayoutSize,
+    materials: _Materials,
+    detail: FloatImage | None,
+    config: AppConfig,
+) -> FloatImage | None:
+    """Feines Bild (Lab) ohne Rahmen für die Mehrheitsfarbe je Noppe; nur ab Glättung MEDIUM.
+
+    Gibt es schon ein Detailbild für die Formwahl, wird es wiederverwendet.
+    """
+    if not SMOOTHING_LEVELS[config.dithering.smoothing].majority:
+        return None
+    if detail is not None:
+        border = config.frame.width * components.shaper.subsample
+        height, width = detail.shape[0] - 2 * border, detail.shape[1] - 2 * border
+        return detail[border : border + height, border : border + width]
+    rgb = components.image_preparer.prepare(
+        image,
+        width=size.image_width * MAJORITY_SUBSAMPLE,
+        height=size.image_height * MAJORITY_SUBSAMPLE,
+        pad_color=materials.pad_color.rgb,
+        background_color=materials.background_rgb,
+    ).rgb
+    return components.color_space.to_lab(rgb.astype(np.float64))
 
 
 def _dither(
     components: PipelineComponents,
     rgb: RgbImage,
+    fine: FloatImage | None,
     palette: tuple[LegoColor, ...],
     config: AppConfig,
 ) -> tuple[IndexGrid, tuple[LegoColor, ...]]:
-    """Dithert das Bild und räumt auf.
+    """Wählt die Farbe jeder Noppe und räumt auf.
+
+    Die Farbe kommt aus dem Dithering oder, mit feinem Bild (Glättung ab MEDIUM), aus der
+    Mehrheit der Teilpixel einer Noppe. Danach:
 
     1. Mit ``max_colors``: ein zweites Mal mit den häufigsten Farben.
     2. Mit ``min_color_share``: Farben auf zu wenigen Zellen fallen weg, das Bild wird ohne
        sie neu gedithert (mehrmals, weil dabei neue seltene Farben entstehen können).
-    3. Mit ``despeckle``: einzelne Pixel bekommen die Farbe ihrer Nachbarn.
+    3. Glättung: kleine Flecken ähnlicher Farbe übernehmen die Umgebung, bei STRONG auch
+       Zellen mit klarer 3×3-Mehrheit. Kontrastreiche Details (Augen) bleiben.
+    4. Mit ``despeckle``: einzelne Pixel bekommen die Farbe ihrer Nachbarn.
     """
     image_lab = components.color_space.to_lab(rgb.astype(np.float64))
+    height, width = rgb.shape[:2]
 
     def lab_of(colors: tuple[LegoColor, ...]) -> FloatImage:
         result: FloatImage = components.color_space.to_lab(
@@ -831,7 +1217,10 @@ def _dither(
         return result
 
     def dither_with(colors: tuple[LegoColor, ...]) -> IndexGrid:
-        return components.ditherer.dither(image_lab, lab_of(colors))
+        if fine is None:
+            return components.ditherer.dither(image_lab, lab_of(colors))
+        sub = components.color_space.nearest(fine, lab_of(colors))
+        return majority_colors(sub, fine.shape[0] // height, len(colors))[:height, :width]
 
     grid = dither_with(palette)
     max_colors = config.palette.max_colors
@@ -848,9 +1237,24 @@ def _dither(
         logger.info("%d seltene Farben zusammengelegt.", len(palette) - len(kept))
         palette = kept
         grid = dither_with(palette)
+    grid = _smooth(components, grid, lab_of(palette), config)
     if config.dithering.despeckle:
         grid = remove_isolated(grid, lab_of(palette))
     return grid, palette
+
+
+def _smooth(
+    components: PipelineComponents, grid: IndexGrid, palette_lab: FloatImage, config: AppConfig
+) -> IndexGrid:
+    """Glättung laut Stufe: kleine ähnliche Flecken zusammenlegen, ggf. 3×3-Mehrheit."""
+    level = SMOOTHING_LEVELS[config.dithering.smoothing]
+    if level.min_cells <= 1 and not level.neighborhood:
+        return grid
+    distances = components.color_space.distances(palette_lab, palette_lab)
+    grid = merge_small_regions(grid, distances, level.min_cells, level.max_delta_e)
+    if level.neighborhood:
+        grid = majority_filter(grid, distances, level.neighborhood, level.max_delta_e)
+    return grid
 
 
 def _tile_sections(

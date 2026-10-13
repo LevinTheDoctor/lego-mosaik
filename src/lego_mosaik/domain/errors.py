@@ -15,6 +15,10 @@ class ConfigError(LegoMosaicError):
     """Ungültige Konfiguration oder ungültige Eingabe (z. B. Breite außerhalb der Grenzen)."""
 
 
+class NotFoundError(LegoMosaicError):
+    """Ein gespeichertes Objekt (Palette, Preset, Mosaik) gibt es nicht."""
+
+
 class CatalogError(LegoMosaicError):
     """Der Teilekatalog fehlt, ist unvollständig oder lässt sich nicht lesen."""
 
@@ -29,3 +33,11 @@ class InvalidImageError(LegoMosaicError):
 
 class TilingError(LegoMosaicError):
     """Die Zerlegung in Teile ist mit den gewählten Teilarten nicht möglich."""
+
+
+class PriceSourceError(LegoMosaicError):
+    """Die BrickLink-Preise konnten nicht abgefragt werden (Netz, Anmeldung, Antwort)."""
+
+
+class MissingCredentialsError(PriceSourceError):
+    """Die BrickLink-Zugangsdaten (Umgebungsvariablen) fehlen."""

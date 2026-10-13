@@ -18,15 +18,16 @@ LOAD, SIZE, FRAME, STYLE, NAME, SETTINGS, PREVIEW, CREATE, PALETTE, FORMATS, QUI
     "1",
     "2",
     "3",
-    "6",
-    "8",
+    "7",
     "9",
     "10",
     "11",
     "12",
     "13",
+    "14",
     "0",
 )
+FILTER, LOAD_PRESET, SAVE_PRESET = "5", "15", "16"
 
 
 @pytest.fixture
@@ -167,3 +168,29 @@ def test_name_can_be_changed(
     assert "Name: Mein Bild" in output  # im Menükopf
     folders = [path.name for path in pipeline_config.output_dir.iterdir()]
     assert len(folders) == 1 and folders[0].endswith("_Mein_Bild")
+
+
+def test_image_filter_and_presets(cli: typer.Typer, image_file: Path) -> None:
+    output = _run(
+        cli,
+        LOAD,
+        str(image_file),
+        FILTER,
+        "sepia",  # Farbfilter
+        "",  # Stärke
+        "abdunkeln",  # Hintergrund
+        "",
+        "",
+        "",
+        SAVE_PRESET,
+        "Sepia dunkel",
+        SETTINGS,
+        LOAD_PRESET,
+        "sepia-dunkel",
+        PREVIEW,
+        QUIT,
+    )
+    assert "Übernommen" in output
+    assert "Preset gespeichert: sepia-dunkel" in output
+    assert "Preset „Sepia dunkel“ übernommen" in output
+    assert UPPER_HALF_BLOCK in output

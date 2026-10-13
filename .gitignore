@@ -14,8 +14,9 @@ wheels/
 .ruff_cache/
 .pytest_cache/
 
-# Heruntergeladene Rebrickable-Dumps und erzeugte Mosaike
+# Heruntergeladene Rebrickable-Dumps, BrickLink-Preis-Cache und erzeugte Mosaike
 daten/rebrickable/
+daten/bricklink/
 ausgabe/
 
 # macOS-Ordnerinfos

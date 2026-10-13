@@ -4,7 +4,7 @@ import json
 import subprocess
 import sys
 
-HEAVY_MODULES = ("skimage", "fastapi", "uvicorn", "numpy", "PIL")
+HEAVY_MODULES = ("skimage", "fastapi", "uvicorn", "numpy", "PIL", "lego_mosaik.pricing")
 
 
 def _loaded_after(code: str) -> dict[str, bool]:
@@ -28,7 +28,9 @@ def test_importing_main_loads_no_heavy_modules() -> None:
 def test_help_loads_no_heavy_modules() -> None:
     code = (
         "import lego_mosaik.main as m, typer.testing; "
-        "typer.testing.CliRunner().invoke(m.create_cli(m.CONFIG, m.build_pipeline), ['--hilfe'])"
+        "cli = m.create_cli(m.CONFIG, m.build_pipeline, None, m.build_price_service); "
+        "typer.testing.CliRunner().invoke(cli, ['--hilfe'])"
     )
     loaded = _loaded_after(code)
     assert not loaded["skimage"] and not loaded["fastapi"]
+    assert not loaded["lego_mosaik.pricing"]

@@ -10,6 +10,8 @@ from lego_mosaik.config import (
     OverrideInput,
     ServerConfig,
     apply_overrides,
+    form_values,
+    override_input,
     parse_fit_mode,
     parse_overrides,
     parse_part_kinds,
@@ -18,7 +20,15 @@ from lego_mosaik.config import (
     validate_config,
 )
 from lego_mosaik.domain.errors import ConfigError
-from lego_mosaik.domain.models import ColorDistance, FitMode, PartKind, Substrate
+from lego_mosaik.domain.models import (
+    BackgroundMode,
+    ColorDistance,
+    ColorFilter,
+    FitMode,
+    PartKind,
+    Smoothing,
+    Substrate,
+)
 
 
 def test_overrides_change_only_given_values(app_config: AppConfig) -> None:
@@ -110,6 +120,15 @@ def test_parse_overrides_translates_german_labels() -> None:
         parse_overrides(OverrideInput(substrate="holz"))
 
 
+def test_parse_smoothing_labels(app_config: AppConfig) -> None:
+    overrides = parse_overrides(OverrideInput(smoothing="Stark"))
+    assert overrides.smoothing is Smoothing.STRONG
+    assert apply_overrides(app_config, overrides).dithering.smoothing is Smoothing.STRONG
+    assert app_config.dithering.smoothing is Smoothing.LIGHT  # Standard
+    with pytest.raises(ConfigError, match="aus, leicht, mittel, stark"):
+        parse_overrides(OverrideInput(smoothing="maximal"))
+
+
 def test_max_colors_zero_means_unlimited(app_config: AppConfig) -> None:
     limited = dataclasses.replace(
         app_config, palette=dataclasses.replace(app_config.palette, max_colors=5)
@@ -150,3 +169,66 @@ def test_invalid_cors_settings_rejected(
 ) -> None:
     with pytest.raises(ConfigError, match=message):
         validate_config(dataclasses.replace(app_config, server=server))
+
+
+# --- Bildbearbeitung, eigene Palette, Formularfelder ------------------------------------
+
+
+def test_image_editing_inputs_are_parsed() -> None:
+    raw = OverrideInput(
+        color_filter="Sepia",
+        rotate=90,
+        mirror=True,
+        crop="10,0,80%,100",
+        background="entfernen",
+        background_color_id=1,
+        color_ids="0, 15,71",
+    )
+    overrides = parse_overrides(raw)
+    assert overrides.color_filter is ColorFilter.SEPIA
+    assert overrides.crop == (10.0, 0.0, 80.0, 100.0)
+    assert overrides.background is BackgroundMode.REMOVE
+    assert overrides.only_color_ids == (0, 15, 71)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (OverrideInput(color_filter="bunt"), "Unbekannte Farbfilter"),
+        (OverrideInput(background="weg"), "Unbekannte Hintergrund-Art"),
+        (OverrideInput(crop="10,10"), "Ausschnitt bitte"),
+        (OverrideInput(color_ids="rot,blau"), "Farb-IDs"),
+    ],
+)
+def test_invalid_image_inputs_are_rejected(raw: OverrideInput, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_overrides(raw)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (MosaicOverrides(rotate=45), "Drehen geht nur"),
+        (MosaicOverrides(crop=(50.0, 0.0, 60.0, 100.0)), "Ausschnitt muss im Bild"),
+        (MosaicOverrides(filter_strength=1.5), "Filterstärke"),
+        (MosaicOverrides(brightness=0.0), "Helligkeit"),
+        (MosaicOverrides(background_tolerance=150.0), "Hintergrund-Toleranz"),
+        (MosaicOverrides(only_color_ids=(0, 0)), "Eigene Palette"),
+    ],
+)
+def test_invalid_image_values_are_rejected(
+    app_config: AppConfig, overrides: MosaicOverrides, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        apply_overrides(app_config, overrides)
+
+
+def test_form_fields_round_trip() -> None:
+    values = {"stil": "punkte", "kontrast": 1, "spiegeln": True, "exotische_farben": True}
+    raw = override_input(values)
+    assert raw.contrast == 1.0 and isinstance(raw.contrast, float)  # 1 → 1.0
+    assert form_values(raw) == {**values, "kontrast": 1.0}
+    with pytest.raises(ConfigError, match="Unbekannte Felder: farbe"):
+        override_input({"farbe": "rot"})
+    with pytest.raises(ConfigError, match="Ungültiger Wert für „breite“"):
+        override_input({"breite": True})

@@ -24,22 +24,27 @@ from lego_mosaik.config import (
     MosaicConfig,
     PaletteConfig,
     PreviewConfig,
+    PricingConfig,
     ReliefConfig,
     ServerConfig,
     ShapeConfig,
     SourceConfig,
+    StorageConfig,
     TilingConfig,
     frame_part_kinds,
     validate_config,
 )
 from lego_mosaik.domain.layout import BOND_PART_STUDS
 from lego_mosaik.domain.models import (
+    BackgroundMode,
     ColorCategory,
     ColorDistance,
+    ColorFilter,
     FitMode,
     PartKind,
     ReliefMode,
     Resampling,
+    Smoothing,
     Substrate,
 )
 from lego_mosaik.registry import (
@@ -51,10 +56,14 @@ from lego_mosaik.registry import (
     validate_registry_names,
 )
 lazy from lego_mosaik.imaging.color_space import LabColorSpace
-lazy from lego_mosaik.imaging.preparer import PillowImagePreparer
+lazy from lego_mosaik.imaging.preparer import ImageEdits, PillowImagePreparer
 lazy from lego_mosaik.interfaces.api import create_app
 lazy from lego_mosaik.interfaces.cli import create_cli
 lazy from lego_mosaik.pipeline import MosaicPipeline, PipelineComponents
+lazy from lego_mosaik.pricing.bricklink_api import BrickLinkPriceSource
+lazy from lego_mosaik.pricing.cache import PriceCache
+lazy from lego_mosaik.pricing.credentials import load_credentials
+lazy from lego_mosaik.pricing.service import PriceService
 lazy from lego_mosaik.sources.rebrickable_csv import RebrickableCsvSource
 lazy from lego_mosaik.sources.updater import CatalogUpdater
 lazy from lego_mosaik.tiling.protocol import TilingStrategy
@@ -83,12 +92,23 @@ CONFIG = AppConfig(
         resampling=Resampling.BOX,  # mittelt Flächen, gut für starkes Verkleinern
         contrast=1.0,  # 1.0 = unverändert
         saturation=1.0,  # 1.0 = unverändert
+        brightness=1.0,  # 1.0 = unverändert
+        color_filter=ColorFilter.NONE,  # GRAYSCALE, SEPIA, WARM, COOL, INVERT, POSTERIZE, VINTAGE
+        filter_strength=1.0,  # 0.0 = Original, 1.0 = voller Filter
+        rotate=0,  # 0, 90, 180, 270 Grad im Uhrzeigersinn
+        mirror=False,  # waagerecht spiegeln
+        crop=None,  # Ausschnitt (x, y, Breite, Höhe) in Prozent, z. B. (10, 0, 80, 100)
+        background=BackgroundMode.KEEP,  # REMOVE, LIGHTEN, DARKEN, DESATURATE, BLUR
+        background_color_id=None,  # neue Farbe bei REMOVE; None = Randfarbe (White)
+        background_tolerance=12.0,  # ΔE: so ähnlich muss ein Pixel der Randfarbe sein
+        background_amount=0.5,  # Stärke für aufhellen, abdunkeln, entsättigen, weichzeichnen
     ),
     palette=PaletteConfig(
         part_kinds=(PartKind.PLATE, PartKind.TILE),  # erlaubt: PLATE, TILE oder nur BRICK
         color_categories=(ColorCategory.SOLID,),  # exotische: METALLIC, PEARL, CHROME, …
         include_color_ids=(),  # einzelne Farben trotz Kategorie erlauben
         exclude_color_ids=(),  # Farben, die nie verwendet werden
+        only_color_ids=None,  # eigene Palette: nur diese Farb-IDs (None = alle)
         max_colors=None,  # optional auf N häufigste Farben begrenzen
         min_color_share=0.002,  # Farben auf weniger als 0,2 % der Fläche zusammenlegen
     ),
@@ -100,6 +120,7 @@ CONFIG = AppConfig(
         bayer_size=4,  # nur "ordered": 2, 4 oder 8
         spread=32.0,  # nur "ordered": Stärke in RGB-Stufen
         despeckle=False,  # einzelne Pixel entfernen (gut für Comics, --aufraeumen)
+        smoothing=Smoothing.LIGHT,  # aus, leicht, mittel (Mehrheitsfarbe je Noppe), stark
     ),
     shapes=ShapeConfig(
         style="formen",  # formen (Rundungen, Wedges an Kanten), quadrat, punkte, noppen
@@ -120,6 +141,7 @@ CONFIG = AppConfig(
         "parts_list_csv",
         "official_parts_lists",
         "instructions_png",
+        "raster_json",
         "result_json",
     ),
     preview=PreviewConfig(stud_px=16, draw_part_edges=True),
@@ -138,6 +160,20 @@ CONFIG = AppConfig(
     ),
     output_dir=Path("ausgabe"),
     server=ServerConfig(host="127.0.0.1", port=8000, max_upload_mb=20, update_interval_hours=24),
+    pricing=PricingConfig(
+        currency="EUR",  # Währung der BrickLink-Preise
+        region="europe",  # Verkäufer aus Europa (None = weltweit)
+        country_code=None,  # oder nur aus einem Land, z. B. "DE"
+        condition="N",  # N = neu, U = gebraucht (auch in der Wanted List)
+        vat="Y",  # Preise mit MwSt.
+        max_age_days=7,  # gespeicherte Preise so lange verwenden
+        max_price_factor=None,  # z. B. 1.5 = Höchstpreis in der Wanted List (Ø verkauft × 1,5)
+    ),
+    storage=StorageConfig(
+        palettes_file=Path("daten/paletten.json"),  # eigene Farbpaletten
+        presets_file=Path("daten/presets.json"),  # Presets mit Bewertung und Favoriten
+        keep_source=True,  # Originalbild + eingaben.json im Mosaik (nötig für „bearbeiten“)
+    ),
 )
 
 
@@ -171,6 +207,43 @@ def build_updater(
     )
 
 
+def build_price_service(
+    config: AppConfig, transport: httpx.BaseTransport | None = None
+) -> PriceService:
+    """Preisschätzung über BrickLink (``transport`` nur für Tests).
+
+    Die Zugangsdaten werden erst gelesen, wenn wirklich abgefragt wird; ``--offline``
+    funktioniert deshalb auch ohne sie.
+    """
+    pricing = config.pricing
+    # Kennung der Abfrage im Cache: Preise in EUR werden nie als USD gelesen
+    region, country = pricing.region or "-", pricing.country_code or "-"
+    settings = "|".join((pricing.condition, pricing.currency, region, country, pricing.vat))
+
+    def source() -> BrickLinkPriceSource:
+        return BrickLinkPriceSource(
+            credentials=load_credentials(),
+            base_url=pricing.base_url,
+            currency=pricing.currency,
+            region=pricing.region,
+            country_code=pricing.country_code,
+            condition=pricing.condition,
+            vat=pricing.vat,
+            timeout_seconds=pricing.timeout_seconds,
+            max_parallel=pricing.max_parallel,
+            user_agent=config.source.user_agent,
+            transport=transport,
+        )
+
+    validate_config(config)
+    return PriceService(
+        pricing,
+        output_dir=config.output_dir,
+        cache=PriceCache(pricing.cache_file, settings, pricing.max_age_days),
+        source_factory=source,
+    )
+
+
 def build_tiler(
     config: AppConfig, part_kinds: tuple[PartKind, ...], max_part_length: int | None = None
 ) -> TilingStrategy:
@@ -192,8 +265,19 @@ def build_components(config: AppConfig) -> PipelineComponents:
         image_preparer=PillowImagePreparer(
             fit_mode=config.mosaic.fit_mode,
             resampling=config.mosaic.resampling,
-            contrast=config.mosaic.contrast,
-            saturation=config.mosaic.saturation,
+            edits=ImageEdits(
+                contrast=config.mosaic.contrast,
+                saturation=config.mosaic.saturation,
+                brightness=config.mosaic.brightness,
+                color_filter=config.mosaic.color_filter,
+                filter_strength=config.mosaic.filter_strength,
+                rotate=config.mosaic.rotate,
+                mirror=config.mosaic.mirror,
+                crop=config.mosaic.crop,
+                background=config.mosaic.background,
+                background_tolerance=config.mosaic.background_tolerance,
+                background_amount=config.mosaic.background_amount,
+            ),
         ),
         color_space=LabColorSpace(config.dithering.color_distance),
         ditherer=resolve(DITHERERS, config.dithering.method, "Dithering-Verfahren")(config),
@@ -239,9 +323,9 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     """Startet die FastAPI-App mit uvicorn (Befehl ``lego-mosaik server``)."""
     if host not in LOOPBACK_HOSTS:
         logger.warning("Achtung: %s ist von außen erreichbar und hat keine Anmeldung!", host)
-    uvicorn.run(create_app(config, build_pipeline), host=host, port=port)
+    uvicorn.run(create_app(config, build_pipeline, build_price_service), host=host, port=port)
 
 
 def run() -> None:
     """Entry Point aus pyproject.toml: startet die deutsche CLI."""
-    create_cli(CONFIG, build_pipeline, serve)()
+    create_cli(CONFIG, build_pipeline, serve, build_price_service)()

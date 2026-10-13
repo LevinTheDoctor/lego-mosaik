@@ -23,8 +23,10 @@ White; Plate Round 1 × 1, Quarter-Tile und Dreieck-Tile 2 × 2 in Red und White
 import csv
 import dataclasses
 import gzip
+import json
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -39,7 +41,9 @@ from lego_mosaik.config import (
     LayoutConfig,
     MosaicConfig,
     PaletteConfig,
+    PricingConfig,
     SourceConfig,
+    StorageConfig,
     TilingConfig,
 )
 from lego_mosaik.domain.models import (
@@ -54,6 +58,9 @@ from lego_mosaik.domain.models import (
 from lego_mosaik.domain.shapes import parse_outline
 from lego_mosaik.main import build_catalog_source, build_components, build_updater
 from lego_mosaik.pipeline import MosaicPipeline
+from lego_mosaik.pricing.cache import PriceCache
+from lego_mosaik.pricing.protocol import PriceGuide, PriceKey, PriceSource
+from lego_mosaik.pricing.service import PriceService
 from lego_mosaik.registry import DITHERERS
 
 
@@ -329,6 +336,13 @@ def app_config(tmp_path: Path) -> AppConfig:
             data_dir=tmp_path / "rebrickable", studio_color_file=None, auto_update=False
         ),
         output_dir=tmp_path / "ausgabe",
+        # Der Preis-Cache darf nie im Projektordner landen
+        pricing=PricingConfig(cache_file=tmp_path / "bricklink" / "preise.json"),
+        # Paletten und Presets ebenso
+        storage=StorageConfig(
+            palettes_file=tmp_path / "bibliothek" / "paletten.json",
+            presets_file=tmp_path / "bibliothek" / "presets.json",
+        ),
     )
 
 
@@ -403,3 +417,51 @@ def image_file(tmp_path: Path) -> Path:
     path = tmp_path / "bild.png"
     Image.fromarray(color_blocks(32)).save(path)
     return path
+
+
+# --- Preise (BrickLink) ------------------------------------------------------------
+
+PRICE_TIME = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+SOLD_PRICE = Decimal("0.1")
+STOCK_PRICE = Decimal("0.12")
+
+
+class FakePriceSource:
+    """Preisquelle ohne Netz: jedes Teil kostet 0,10 (verkauft) bzw. 0,12 (angeboten).
+
+    ``calls`` merkt sich die abgefragten Schlüssel, damit Tests den Cache prüfen können.
+    """
+
+    def __init__(self, unknown: Iterable[PriceKey] = ()) -> None:
+        self.calls: list[list[PriceKey]] = []
+        self._unknown = frozenset(unknown)
+
+    def fetch(self, keys: Sequence[PriceKey]) -> dict[PriceKey, PriceGuide]:
+        self.calls.append(list(keys))
+        return {
+            key: PriceGuide(None, None, PRICE_TIME)
+            if key in self._unknown
+            else PriceGuide(SOLD_PRICE, STOCK_PRICE, PRICE_TIME)
+            for key in keys
+        }
+
+
+def make_price_service(config: AppConfig, source: PriceSource | None = None) -> PriceService:
+    """Preisschätzung wie in ``main.build_price_service``, aber mit Fake-Quelle und fester Uhr."""
+    fake = FakePriceSource() if source is None else source
+    pricing = config.pricing
+    return PriceService(
+        pricing,
+        output_dir=config.output_dir,
+        cache=PriceCache(pricing.cache_file, "test", pricing.max_age_days, now=lambda: PRICE_TIME),
+        source_factory=lambda: fake,
+    )
+
+
+def add_bricklink_colors(mosaic_dir: Path) -> None:
+    """Gibt jeder Farbe der Teileliste einen BrickLink-Code (die Testfarben haben keinen)."""
+    path = mosaic_dir / "ergebnis.json"
+    result = json.loads(path.read_text(encoding="utf-8"))
+    for row in result["teileliste"]:
+        row["bricklink_farbe"] = row["farbe_id"] + 100
+    path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")

@@ -18,13 +18,17 @@ lazy from rich.prompt import Prompt
 lazy from rich.table import Table
 
 from lego_mosaik.config import (
+    BACKGROUND_LABELS,
     COLOR_DISTANCE_LABELS,
+    COLOR_FILTER_LABELS,
     FIT_MODE_LABELS,
     RELIEF_LABELS,
+    SMOOTHING_LABELS,
     SUBSTRATE_LABELS,
     AppConfig,
     OverrideInput,
     apply_overrides,
+    form_values,
     frame_part_kinds,
     label_of,
     parse_overrides,
@@ -37,10 +41,14 @@ from lego_mosaik.interfaces.display import (
     mosaic_preview,
     print_formats,
     print_palette,
+    print_presets,
+    print_prices,
     print_summary,
 )
+from lego_mosaik.storage.library import Library
 lazy from lego_mosaik.imaging.protocol import ImageInfo
 lazy from lego_mosaik.pipeline import MosaicPipeline
+lazy from lego_mosaik.pricing.service import PriceService
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +61,7 @@ FORMAT_FIELD = "art_format"
 SIZE_FIELDS = ("plates", "width_studs", "height_studs")
 
 type PipelineFactory = Callable[[AppConfig], MosaicPipeline]
+type PriceFactory = Callable[[AppConfig], PriceService]
 type Convert = Callable[[str], object]
 type Current = Callable[[AppConfig, OverrideInput], object]
 
@@ -85,6 +94,11 @@ def _yes_no(text: str) -> bool:
 def _or_dash(value: object) -> object:
     """Leere Werte als „–“ anzeigen."""
     return "–" if value is None else value
+
+
+def _crop_text(config: AppConfig) -> str:
+    crop = config.mosaic.crop
+    return "ganzes Bild" if crop is None else ",".join(f"{value:g}" for value in crop)
 
 
 def _format_name(config: AppConfig) -> str:
@@ -194,6 +208,71 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
                 float,
                 lambda c, i: c.mosaic.saturation,
             ),
+            _Field(
+                "brightness",
+                "Helligkeit (1.0 = unverändert)",
+                float,
+                lambda c, i: c.mosaic.brightness,
+            ),
+            _Field(
+                "rotate",
+                "Drehen im Uhrzeigersinn (0, 90, 180, 270)",
+                int,
+                lambda c, i: c.mosaic.rotate,
+            ),
+            _Field(
+                "mirror",
+                "Waagerecht spiegeln? (ja/nein)",
+                _yes_no,
+                lambda c, i: "ja" if c.mosaic.mirror else "nein",
+            ),
+            _Field(
+                "crop",
+                "Ausschnitt x,y,Breite,Höhe in Prozent (z. B. 10,0,80,100)",
+                str,
+                lambda c, i: _crop_text(c),
+            ),
+        ),
+    ),
+    (
+        "Farbfilter und Hintergrund",
+        (
+            _Field(
+                "color_filter",
+                f"Farbfilter: {', '.join(COLOR_FILTER_LABELS)}",
+                str,
+                lambda c, i: label_of(COLOR_FILTER_LABELS, c.mosaic.color_filter),
+            ),
+            _Field(
+                "filter_strength",
+                "Stärke des Filters (0.0 bis 1.0)",
+                float,
+                lambda c, i: c.mosaic.filter_strength,
+            ),
+            _Field(
+                "background",
+                f"Hintergrund: {', '.join(BACKGROUND_LABELS)}",
+                str,
+                lambda c, i: label_of(BACKGROUND_LABELS, c.mosaic.background),
+            ),
+            _Field(
+                "background_color_id",
+                "Neue Hintergrundfarbe bei „entfernen“ (Rebrickable-ID, „-“ = Randfarbe)",
+                int,
+                lambda c, i: _or_dash(c.mosaic.background_color_id),
+            ),
+            _Field(
+                "background_tolerance",
+                "Toleranz der Erkennung (ΔE, größer = mehr Hintergrund)",
+                float,
+                lambda c, i: c.mosaic.background_tolerance,
+            ),
+            _Field(
+                "background_amount",
+                "Stärke für aufhellen, abdunkeln, entsättigen, weichzeichnen (0.0 bis 1.0)",
+                float,
+                lambda c, i: c.mosaic.background_amount,
+            ),
         ),
     ),
     (
@@ -222,6 +301,12 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
                 "Höchstens so viele Farben (0 = unbegrenzt)",
                 int,
                 lambda c, i: c.palette.max_colors or "unbegrenzt",
+            ),
+            _Field(
+                "color_ids",
+                "Nur diese Farb-IDs, z. B. 0,15,71 („-“ = alle; Paletten über „Preset laden“)",
+                str,
+                lambda c, i: i.color_ids or "alle",
             ),
         ),
     ),
@@ -265,6 +350,12 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
                 lambda c, i: "ja" if c.dithering.despeckle else "nein",
             ),
             _Field(
+                "smoothing",
+                "Glättung: aus, leicht, mittel (klare Flächen) oder stark",
+                str,
+                lambda c, i: label_of(SMOOTHING_LABELS, c.dithering.smoothing),
+            ),
+            _Field(
                 "color_distance",
                 "Farbabstand: cie76 (schnell) oder ciede2000 (genau)",
                 str,
@@ -306,6 +397,7 @@ class InteractiveSession:
         console: Rich-Konsole für Ein- und Ausgabe.
         config: Standardkonfiguration aus ``main.py``.
         pipeline_factory: Erzeugt die Pipeline (einmal, beim ersten Bedarf).
+        price_factory: Erzeugt die BrickLink-Preisschätzung; ``None`` blendet den Menüpunkt aus.
         debug: Fehler mit Traceback weiterwerfen statt nur die Meldung zu zeigen.
     """
 
@@ -315,6 +407,7 @@ class InteractiveSession:
         config: AppConfig,
         pipeline_factory: PipelineFactory,
         *,
+        price_factory: PriceFactory | None = None,
         debug: bool = False,
     ) -> None:
         self.console = console
@@ -324,6 +417,8 @@ class InteractiveSession:
         self.image_info: ImageInfo | None = None
         self._pipeline_factory = pipeline_factory
         self._pipeline: MosaicPipeline | None = None
+        self._price_factory = price_factory
+        self._last_result_dir: Path | None = None  # zuletzt erstelltes Mosaik (für Preise)
         self._debug = debug
 
     @property
@@ -371,13 +466,17 @@ class InteractiveSession:
             # functools.partial legt die Argumente jetzt fest; ein lambda würde erst beim
             # Aufruf nachsehen und dann bei allen Menüpunkten die letzte Gruppe finden
             actions[str(number)] = (title, functools.partial(self.edit, title, fields))
-        extra = (
+        extra: tuple[tuple[str, Callable[[], object]], ...] = (
             ("Einstellungen anzeigen", self.show_settings),
             ("Vorschau im Terminal", self.preview),
             ("Mosaik erstellen und Dateien ausgeben", self.create),
             ("Farbpalette anzeigen", self.show_palette),
             ("Formate anzeigen", self.show_formats),
+            ("Preset laden", self.load_preset),
+            ("Einstellungen als Preset speichern", self.save_preset),
         )
+        if self._price_factory is not None:
+            extra += (("Preis bei BrickLink schätzen (zuletzt erstelltes Mosaik)", self.prices),)
         for number, entry in enumerate(extra, start=len(GROUPS) + 2):
             actions[str(number)] = entry
         return actions
@@ -513,6 +612,49 @@ class InteractiveSession:
                 on_step=lambda label: status.update(label),
             )
         print_summary(self.console, result)
+        self._last_result_dir = result.target_dir
+
+    def prices(self) -> None:
+        """Schätzt den Preis des zuletzt erstellten Mosaiks und aktualisiert die Wanted List."""
+        if self._price_factory is None:
+            return
+        if self._last_result_dir is None:
+            self.console.print("[yellow]Bitte zuerst ein Mosaik erstellen.[/yellow]")
+            return
+        service = self._price_factory(self.config)
+        with self.console.status("Frage Preise bei BrickLink ab …"):
+            estimate = service.estimate(self._last_result_dir)
+        print_prices(self.console, estimate, service.pricing.upload_url)
+
+    def load_preset(self) -> None:
+        """Zeigt die Presets und übernimmt die Einstellungen des gewählten (Name bleibt)."""
+        library = Library.open(self.config.storage)
+        presets = library.presets.list()
+        print_presets(self.console, presets)
+        if not presets:
+            return
+        answer = Prompt.ask("Preset (Name oder ID, Enter = abbrechen)", console=self.console)
+        if not answer.strip():
+            return
+        resolved = library.resolve({}, preset=answer.strip())
+        candidate = replace(resolved.inputs, title=self.inputs.title)
+        apply_overrides(self.config, parse_overrides(candidate))  # erst prüfen, dann übernehmen
+        self.inputs = candidate
+        name = resolved.preset.name if resolved.preset else answer
+        library.presets.record_use(answer.strip())
+        self.console.print(f"[green]Preset „{escape(name)}“ übernommen.[/green]")
+
+    def save_preset(self) -> None:
+        """Speichert die aktuellen Eingaben (ohne Name des Mosaiks) als Preset."""
+        name = Prompt.ask("Name des Presets", console=self.console).strip()
+        if not name:
+            return
+        values = form_values(self.inputs)
+        values.pop("titel", None)
+        library = Library.open(self.config.storage)
+        settings = library.preset_settings(values, self.pipeline.check)
+        preset = library.presets.create(name, "", settings)
+        self.console.print(f"[green]Preset gespeichert:[/green] {escape(preset.id)}")
 
     def show_formats(self) -> None:
         """Formate mit Größe in Noppen bei der aktuellen Plattengröße."""

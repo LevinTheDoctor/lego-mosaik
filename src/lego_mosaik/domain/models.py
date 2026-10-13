@@ -23,6 +23,9 @@ type IndexGrid = npt.NDArray[np.intp]
 type FloatImage = npt.NDArray[np.float64]
 """H×W×3-Bild mit Gleitkommawerten, z. B. im Lab-Farbraum."""
 
+type BoolGrid = npt.NDArray[np.bool_]
+"""H×W-Maske, z. B. True = Hintergrund."""
+
 type RgbTuple = tuple[int, int, int]
 """Farbe als (Rot, Grün, Blau), je 0–255."""
 
@@ -128,11 +131,74 @@ class FitMode(StrEnum):
     PAD = "pad"  # vollständig einpassen und mit Randfarbe auffüllen
 
 
+class ColorFilter(StrEnum):
+    """Farbfilter, der vor dem Dithering auf das Bild gelegt wird."""
+
+    NONE = "none"
+    GRAYSCALE = "grayscale"  # Graustufen
+    SEPIA = "sepia"  # braun getöntes Schwarzweiß
+    WARM = "warm"  # mehr Rot und Gelb
+    COOL = "cool"  # mehr Blau
+    INVERT = "invert"  # Negativ
+    POSTERIZE = "posterize"  # wenige Tonstufen pro Kanal (Plakat-Look)
+    VINTAGE = "vintage"  # verblasst, leicht sepia
+
+
+class BackgroundMode(StrEnum):
+    """Was mit dem erkannten Hintergrund des Bilds passiert."""
+
+    KEEP = "keep"  # unverändert (keine Erkennung)
+    REMOVE = "remove"  # durch eine einzige LEGO-Farbe ersetzen
+    LIGHTEN = "lighten"  # heller machen (Motiv hebt sich ab)
+    DARKEN = "darken"  # dunkler machen
+    DESATURATE = "desaturate"  # Farbe herausnehmen
+    BLUR = "blur"  # weichzeichnen (weniger Unruhe im Hintergrund)
+
+
 class ColorDistance(StrEnum):
     """Formel für den Farbabstand im Lab-Raum."""
 
     CIE76 = "cie76"  # euklidischer Abstand, schnell
     CIEDE2000 = "ciede2000"  # wahrnehmungsnäher, langsamer
+
+
+class Smoothing(StrEnum):
+    """Wie stark das Raster nach der Farbwahl geglättet wird."""
+
+    NONE = "none"  # wie gedithert (nur ``despeckle`` räumt auf)
+    LIGHT = "light"  # Dithering, danach kleine Flecken ähnlicher Farben weg
+    MEDIUM = "medium"  # Mehrheitsfarbe je Noppe statt Dithering, dann aufräumen
+    STRONG = "strong"  # wie MEDIUM, größere Flecken und 3×3-Mehrheit
+
+
+@dataclass(frozen=True, slots=True)
+class SmoothingLevel:
+    """Parameter einer Glättungsstufe.
+
+    Attributes:
+        majority: Mehrheitsfarbe je Noppe aus Teilpixeln statt Dithering.
+        min_cells: Gleichfarbige Flächen unter so vielen Zellen werden zusammengelegt.
+        max_delta_e: … aber nur, wenn ihre Farbe der Umgebung so ähnlich ist (ΔE2000).
+            Kontrastreiche Details wie Augen oder Pupillen bleiben dadurch stehen.
+        neighborhood: Zelle übernimmt die Mehrheit ihres 3×3-Felds ab so vielen
+            gleichen Zellen (0 = aus).
+    """
+
+    majority: bool
+    min_cells: int
+    max_delta_e: float
+    neighborhood: int = 0
+
+
+# Schwellen in ΔE2000: Rauschen liegt darunter (Black/Dark Brown 24, White/Light Bluish
+# Gray 22, White/Tan 20), Details wie Augen weit darüber (White/Black 93). STRONG schluckt
+# auch Glanzlichter (Light Bluish Gray in Black 52)
+SMOOTHING_LEVELS: Mapping[Smoothing, SmoothingLevel] = {
+    Smoothing.NONE: SmoothingLevel(majority=False, min_cells=0, max_delta_e=0.0),
+    Smoothing.LIGHT: SmoothingLevel(majority=False, min_cells=3, max_delta_e=25.0),
+    Smoothing.MEDIUM: SmoothingLevel(majority=True, min_cells=4, max_delta_e=30.0),
+    Smoothing.STRONG: SmoothingLevel(majority=True, min_cells=6, max_delta_e=55.0, neighborhood=6),
+}
 
 
 class Resampling(StrEnum):
@@ -467,6 +533,57 @@ class PartsList:
     def total_quantity(self) -> int:
         """Gesamtzahl aller Teile."""
         return sum(entry.quantity for entry in self.entries)
+
+    @property
+    def order_items(self) -> tuple[OrderItem, ...]:
+        """Die Einträge als Bestellpositionen (gleiche Reihenfolge)."""
+        return tuple(OrderItem.from_entry(entry) for entry in self.entries)
+
+
+@dataclass(frozen=True, slots=True)
+class OrderItem:
+    """Eine Bestellposition ohne Katalogobjekte (z. B. aus ``ergebnis.json`` gelesen).
+
+    Damit lassen sich Preise und Wanted List auch für ein früher erzeugtes Mosaik
+    berechnen, ohne den Teilekatalog neu zu laden.
+
+    Attributes:
+        part_num: Rebrickable-Teilenummer.
+        bricklink_item: Teilenummer bei BrickLink.
+        name: Teilname.
+        color_id: Rebrickable-Farb-ID.
+        color_name: Farbname (Rebrickable).
+        bricklink_color: BrickLink-Farbcode; ``None``, wenn unbekannt.
+        quantity: Stückzahl.
+    """
+
+    part_num: str
+    bricklink_item: str
+    name: str
+    color_id: int
+    color_name: str
+    bricklink_color: int | None
+    quantity: int
+
+    @classmethod
+    def from_entry(cls, entry: PartsListEntry) -> OrderItem:
+        """Übernimmt Teil, Farbe und Menge aus einer Zeile der Teileliste."""
+        return cls(
+            part_num=entry.part.part_num,
+            bricklink_item=entry.part.bricklink_item,
+            name=entry.part.name,
+            color_id=entry.color.id,
+            color_name=entry.color.name,
+            bricklink_color=entry.color.bricklink_code,
+            quantity=entry.quantity,
+        )
+
+    @property
+    def bricklink_key(self) -> tuple[str, int] | None:
+        """(BrickLink-Teil, BrickLink-Farbe) oder ``None`` ohne Farbcode."""
+        if self.bricklink_color is None:
+            return None
+        return self.bricklink_item, self.bricklink_color
 
 
 def _parts_list_sort_key(entry: PartsListEntry) -> tuple[object, ...]:

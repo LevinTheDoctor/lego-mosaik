@@ -10,19 +10,22 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Protocol, get_type_hints
 
 from lego_mosaik.domain.errors import ConfigError
 from lego_mosaik.domain.layout import MAX_STUDS, MIN_STUDS, check_size, find_format, snap_to_plates
 from lego_mosaik.domain.models import (
     MOSAIC_PART_KINDS,
+    BackgroundMode,
     ColorCategory,
     ColorDistance,
+    ColorFilter,
     FitMode,
     PartKind,
     PartShape,
     ReliefMode,
     Resampling,
+    Smoothing,
     Substrate,
 )
 from lego_mosaik.domain.relief import MAX_RELIEF_LEVELS
@@ -45,6 +48,27 @@ MAX_SUBSAMPLE = 12  # Teilpixel pro Noppe und Richtung bei der Formwahl
 # Origins lokaler Frontends (CORS): http(s)://localhost, 127.0.0.1 oder [::1] mit beliebigem Port
 ORIGIN = re.compile(r"https?://[^/\s]+")  # ein einzelner Origin: Schema und Host, kein Pfad
 LOCAL_ORIGINS = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
+# Werte der BrickLink-API (Price Guide)
+CURRENCY = re.compile(r"[A-Z]{3}")  # ISO 4217
+COUNTRY = re.compile(r"[A-Z]{2}")  # ISO 3166-1 alpha-2
+BRICKLINK_REGIONS = (
+    "africa",
+    "asia",
+    "eu",
+    "europe",
+    "middle_east",
+    "north_america",
+    "oceania",
+    "south_america",
+)
+BRICKLINK_CONDITIONS = ("N", "U")
+BRICKLINK_VAT = ("N", "Y", "O")
+MAX_PARALLEL_REQUESTS = 16
+# Bild bearbeiten
+ROTATIONS = (0, 90, 180, 270)  # Drehung im Uhrzeigersinn in Grad
+PERCENT = 100.0
+CROP_VALUES = 4  # Ausschnitt: x, y, Breite, Höhe
+MAX_BACKGROUND_TOLERANCE = 100.0  # ΔE; größer würde fast jedes Bild ganz zum Hintergrund
 
 
 # Deutsche Bezeichnungen für CLI, API und interaktiven Modus → interne Enum-Werte
@@ -52,6 +76,12 @@ FIT_MODE_LABELS: Mapping[str, FitMode] = {"zuschneiden": FitMode.CROP, "einpasse
 COLOR_DISTANCE_LABELS: Mapping[str, ColorDistance] = {
     "cie76": ColorDistance.CIE76,
     "ciede2000": ColorDistance.CIEDE2000,
+}
+SMOOTHING_LABELS: Mapping[str, Smoothing] = {
+    "aus": Smoothing.NONE,
+    "leicht": Smoothing.LIGHT,
+    "mittel": Smoothing.MEDIUM,
+    "stark": Smoothing.STRONG,
 }
 SUBSTRATE_LABELS: Mapping[str, Substrate] = {
     "art": Substrate.ART_PANEL,
@@ -64,6 +94,24 @@ RELIEF_LABELS: Mapping[str, ReliefMode] = {
     "motiv": ReliefMode.SUBJECT,
     "hell": ReliefMode.BRIGHT,
     "dunkel": ReliefMode.DARK,
+}
+COLOR_FILTER_LABELS: Mapping[str, ColorFilter] = {
+    "ohne": ColorFilter.NONE,
+    "graustufen": ColorFilter.GRAYSCALE,
+    "sepia": ColorFilter.SEPIA,
+    "warm": ColorFilter.WARM,
+    "kalt": ColorFilter.COOL,
+    "invertieren": ColorFilter.INVERT,
+    "poster": ColorFilter.POSTERIZE,
+    "vintage": ColorFilter.VINTAGE,
+}
+BACKGROUND_LABELS: Mapping[str, BackgroundMode] = {
+    "behalten": BackgroundMode.KEEP,
+    "entfernen": BackgroundMode.REMOVE,
+    "aufhellen": BackgroundMode.LIGHTEN,
+    "abdunkeln": BackgroundMode.DARKEN,
+    "entsaettigen": BackgroundMode.DESATURATE,
+    "weichzeichnen": BackgroundMode.BLUR,
 }
 # Standardfarbe des Unterbaus, wenn keine angegeben ist (Rebrickable-IDs)
 DEFAULT_SUBSTRATE_COLOR_IDS: Mapping[Substrate, int] = {
@@ -127,13 +175,28 @@ class FrameConfig:
 
 @dataclass(frozen=True, slots=True)
 class MosaicConfig:
-    """Bildaufbereitung: Einpassen, Randfarbe, Skalierung, Kontrast und Sättigung."""
+    """Bildaufbereitung vor dem Dithering.
+
+    Reihenfolge: drehen und spiegeln → Ausschnitt → Hintergrund erkennen → Farbfilter →
+    Helligkeit, Kontrast, Sättigung → Hintergrund anpassen → auf die Mosaikgröße bringen.
+    """
 
     fit_mode: FitMode = FitMode.CROP
     pad_color_id: int = 15  # Rebrickable-ID 15 = White
     resampling: Resampling = Resampling.BOX
     contrast: float = 1.0  # 1.0 = unverändert
     saturation: float = 1.0  # 1.0 = unverändert
+    brightness: float = 1.0  # 1.0 = unverändert
+    color_filter: ColorFilter = ColorFilter.NONE
+    filter_strength: float = 1.0  # 0.0 = Original, 1.0 = voller Filter
+    rotate: int = 0  # Drehung im Uhrzeigersinn: 0, 90, 180 oder 270 Grad
+    mirror: bool = False  # waagerecht spiegeln
+    # Ausschnitt als (x, y, Breite, Höhe) in Prozent des gedrehten Bilds; None = ganzes Bild
+    crop: tuple[float, float, float, float] | None = None
+    background: BackgroundMode = BackgroundMode.KEEP
+    background_color_id: int | None = None  # für „entfernen“; None = Randfarbe (pad_color_id)
+    background_tolerance: float = 12.0  # ΔE: so ähnlich muss ein Pixel der Randfarbe sein
+    background_amount: float = 0.5  # Stärke von aufhellen, abdunkeln, entsättigen, weichzeichnen
 
 
 # "Exotische" Farben: alles außer Solid; Gummi (Rubber) taugt nie für Mosaike
@@ -169,6 +232,8 @@ class PaletteConfig:
     color_categories: tuple[ColorCategory, ...] = (ColorCategory.SOLID,)
     include_color_ids: tuple[int, ...] = ()  # einzelne Farben trotz Kategorie erlauben
     exclude_color_ids: tuple[int, ...] = ()  # hat Vorrang vor allem anderen
+    # Eigene Palette: nur diese Farben (sofern es sie für Teilarten und Stil gibt); None = alle
+    only_color_ids: tuple[int, ...] | None = None
     max_colors: int | None = None  # None = keine Begrenzung
     # Farben, die nach dem Dithering auf weniger als diesem Anteil der Bildfläche liegen,
     # fallen weg; das Bild wird ohne sie neu gedithert (0 = alle Farben behalten)
@@ -188,6 +253,9 @@ class DitheringConfig:
     # Einzelne Pixel (kein Nachbar in derselben Farbe) durch die Nachbarfarbe ersetzen:
     # weniger Rauschen und 1×1-Teile, gut für Comics und Logos, weniger für Fotos
     despeckle: bool = False
+    # Kleine Flecken ähnlicher Farben zusammenlegen, ab MEDIUM Mehrheitsfarbe je Noppe statt
+    # Dithering; kontrastreiche Details (Augen, Pupillen) bleiben stehen
+    smoothing: Smoothing = Smoothing.LIGHT
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +401,39 @@ class ServerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PricingConfig:
+    """Preisschätzung über die BrickLink-API (Price Guide) und die Wanted List.
+
+    Die Zugangsdaten stehen bewusst nicht hier, sondern in Umgebungsvariablen
+    (siehe ``pricing/credentials.py``), damit sie nie in ``ergebnis.json`` landen.
+    """
+
+    base_url: str = "https://api.bricklink.com/api/store/v1"
+    currency: str = "EUR"  # ISO 4217, z. B. EUR, USD, GBP
+    region: str | None = "europe"  # Verkäufer aus dieser Region (None = weltweit)
+    country_code: str | None = None  # oder nur aus einem Land, z. B. "DE"
+    condition: str = "N"  # N = neu, U = gebraucht (auch <CONDITION> in der Wanted List)
+    vat: str = "Y"  # Y = mit MwSt., N = ohne, O = mit norwegischer MwSt.
+    cache_file: Path = Path("daten/bricklink/preise.json")
+    max_age_days: int = 7  # ältere Preise werden neu abgefragt
+    timeout_seconds: float = 30.0
+    max_parallel: int = 4  # gleichzeitige Anfragen (BrickLink erlaubt 5.000 pro Tag)
+    # Höchstpreis in der Wanted List = Ø Verkaufspreis × Faktor (None = ohne Höchstpreis)
+    max_price_factor: float | None = None
+    upload_url: str = "https://www.bricklink.com/v2/wanted/upload.page"
+
+
+@dataclass(frozen=True, slots=True)
+class StorageConfig:
+    """Gespeicherte Bibliothek und was jeder Lauf zusätzlich aufhebt."""
+
+    palettes_file: Path = Path("daten/paletten.json")  # eigene Farbpaletten
+    presets_file: Path = Path("daten/presets.json")  # Presets mit Bewertung und Favoriten
+    # Originalbild und Eingaben im Mosaik-Ordner speichern (nötig für „bearbeiten“)
+    keep_source: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     """Gesamte Konfiguration. Wird einmal in ``main.py`` erzeugt."""
 
@@ -351,6 +452,8 @@ class AppConfig:
     ldraw: LdrawConfig = field(default_factory=LdrawConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
 
 
 def frame_part_kinds(config: AppConfig) -> tuple[PartKind, ...]:
@@ -391,10 +494,21 @@ class MosaicOverrides:
     fit_mode: FitMode | None = None
     contrast: float | None = None
     saturation: float | None = None
+    brightness: float | None = None
+    color_filter: ColorFilter | None = None
+    filter_strength: float | None = None
+    rotate: int | None = None
+    mirror: bool | None = None
+    crop: tuple[float, float, float, float] | None = None
+    background: BackgroundMode | None = None
+    background_color_id: int | None = None
+    background_tolerance: float | None = None
+    background_amount: float | None = None
     # Farben und Teile
     part_kinds: tuple[PartKind, ...] | None = None
     color_categories: tuple[ColorCategory, ...] | None = None
     max_colors: int | None = None  # 0 = keine Begrenzung
+    only_color_ids: tuple[int, ...] | None = None
     # Stil und Relief
     style: str | None = None
     relief: ReliefMode | None = None
@@ -404,6 +518,7 @@ class MosaicOverrides:
     strength: float | None = None
     color_distance: ColorDistance | None = None
     despeckle: bool | None = None
+    smoothing: Smoothing | None = None
     tiling_strategy: str | None = None
     outputs: tuple[str, ...] | None = None
     output_dir: Path | None = None
@@ -440,13 +555,27 @@ def apply_overrides(config: AppConfig, overrides: MosaicOverrides) -> AppConfig:
             raise_plates=o.frame_raise_plates,
         ),
         mosaic=_merged(
-            config.mosaic, fit_mode=o.fit_mode, contrast=o.contrast, saturation=o.saturation
+            config.mosaic,
+            fit_mode=o.fit_mode,
+            contrast=o.contrast,
+            saturation=o.saturation,
+            brightness=o.brightness,
+            color_filter=o.color_filter,
+            filter_strength=o.filter_strength,
+            rotate=o.rotate,
+            mirror=o.mirror,
+            crop=o.crop,
+            background=o.background,
+            background_color_id=o.background_color_id,
+            background_tolerance=o.background_tolerance,
+            background_amount=o.background_amount,
         ),
         palette=_merged(
             config.palette,
             part_kinds=o.part_kinds,
             color_categories=o.color_categories,
             max_colors=o.max_colors,
+            only_color_ids=o.only_color_ids,
         ),
         dithering=_merged(
             config.dithering,
@@ -454,6 +583,7 @@ def apply_overrides(config: AppConfig, overrides: MosaicOverrides) -> AppConfig:
             strength=o.strength,
             color_distance=o.color_distance,
             despeckle=o.despeckle,
+            smoothing=o.smoothing,
         ),
         shapes=_merged(config.shapes, style=o.style),
         relief=_merged(config.relief, mode=o.relief, levels=o.relief_levels),
@@ -507,9 +637,10 @@ def validate_config(config: AppConfig) -> None:
     _check_shapes(config)
     _check_range("Relief-Höhe", config.relief.levels, 1, MAX_RELIEF_LEVELS, "Plates")
     _check_range("Dithering-Stärke", config.dithering.strength, 0.0, 1.0)
-    _check_positive("Kontrast", config.mosaic.contrast)
-    _check_positive("Sättigung", config.mosaic.saturation)
+    _check_image(config.mosaic)
     _check_part_kinds(config.palette.part_kinds)
+    if config.palette.only_color_ids is not None:
+        _check_unique_non_empty("Eigene Palette", tuple(map(str, config.palette.only_color_ids)))
     _check_unique_non_empty("Farbkategorien", config.palette.color_categories)
     _check_range(
         "Mindestanteil einer Farbe", config.palette.min_color_share, 0.0, MAX_MIN_COLOR_SHARE
@@ -533,6 +664,7 @@ def validate_config(config: AppConfig) -> None:
     _check_range("Port", config.server.port, MIN_PORT, MAX_PORT)
     _check_range("Upload-Grenze", config.server.max_upload_mb, 1, 1024, "MB")
     _check_cors(config.server)
+    _check_pricing(config.pricing)
 
 
 def _check_range(label: str, value: float, minimum: float, maximum: float, unit: str = "") -> None:
@@ -615,6 +747,52 @@ def _check_cors(server: ServerConfig) -> None:
             )
 
 
+def _check_pricing(pricing: PricingConfig) -> None:
+    """Währung, Region, Land, Zustand und MwSt. in der Schreibweise der BrickLink-API."""
+    if not CURRENCY.fullmatch(pricing.currency):
+        raise ConfigError(f"Währung „{pricing.currency}“ ungültig. Beispiel: EUR, USD, GBP.")
+    if pricing.region is not None and pricing.region not in BRICKLINK_REGIONS:
+        raise ConfigError(
+            f"Region „{pricing.region}“ unbekannt. Gültig sind: {_join(BRICKLINK_REGIONS)}."
+        )
+    if pricing.country_code is not None and not COUNTRY.fullmatch(pricing.country_code):
+        raise ConfigError(f"Land „{pricing.country_code}“ ungültig. Beispiel: DE, AT, CH.")
+    if pricing.condition not in BRICKLINK_CONDITIONS:
+        raise ConfigError("Der Zustand muss N (neu) oder U (gebraucht) sein.")
+    if pricing.vat not in BRICKLINK_VAT:
+        raise ConfigError("Die MwSt.-Angabe muss Y (mit), N (ohne) oder O (Norwegen) sein.")
+    _check_range("Höchstalter der Preise", pricing.max_age_days, 0, MAX_RECENT_YEARS * 365, "Tage")
+    _check_positive("Timeout der Preisabfrage", pricing.timeout_seconds)
+    _check_range("Gleichzeitige Preisabfragen", pricing.max_parallel, 1, MAX_PARALLEL_REQUESTS)
+    if pricing.max_price_factor is not None:
+        _check_positive("Faktor für den Höchstpreis", pricing.max_price_factor)
+
+
+def _check_image(mosaic: MosaicConfig) -> None:
+    """Werte der Bildbearbeitung: Faktoren, Drehung, Ausschnitt und Hintergrund."""
+    _check_positive("Kontrast", mosaic.contrast)
+    _check_positive("Sättigung", mosaic.saturation)
+    _check_positive("Helligkeit", mosaic.brightness)
+    _check_range("Filterstärke", mosaic.filter_strength, 0.0, 1.0)
+    if mosaic.rotate not in ROTATIONS:
+        raise ConfigError(
+            f"Drehen geht nur um {_join(map(str, ROTATIONS))} Grad (angegeben: {mosaic.rotate})."
+        )
+    if mosaic.crop is not None:
+        x, y, width, height = mosaic.crop
+        for label, value in (("x", x), ("y", y), ("Breite", width), ("Höhe", height)):
+            _check_range(f"Ausschnitt {label}", value, 0.0, PERCENT, "%")
+        if width <= 0 or height <= 0 or x + width > PERCENT or y + height > PERCENT:
+            raise ConfigError(
+                "Der Ausschnitt muss im Bild liegen und eine Fläche haben "
+                f"(x + Breite und y + Höhe höchstens {PERCENT:g} %)."
+            )
+    _check_range(
+        "Hintergrund-Toleranz", mosaic.background_tolerance, 0.0, MAX_BACKGROUND_TOLERANCE, "ΔE"
+    )
+    _check_range("Hintergrund-Stärke", mosaic.background_amount, 0.0, 1.0)
+
+
 def _check_frame(frame: FrameConfig) -> None:
     """Rahmenbreite, Erhöhung und Teilarten des Rahmens."""
     _check_positive("Rahmenbreite", frame.width, allow_zero=True)
@@ -667,11 +845,22 @@ class OverrideInput:
     fit_mode: str | None = None  # zuschneiden, einpassen
     contrast: float | None = None
     saturation: float | None = None
+    brightness: float | None = None
+    color_filter: str | None = None  # ohne, graustufen, sepia, …
+    filter_strength: float | None = None
+    rotate: int | None = None  # 0, 90, 180, 270
+    mirror: bool | None = None
+    crop: str | None = None  # "x,y,b,h" in Prozent, z. B. "10,0,80,100"
+    background: str | None = None  # behalten, entfernen, aufhellen, …
+    background_color_id: int | None = None
+    background_tolerance: float | None = None
+    background_amount: float | None = None
     # Farben und Teile
     part_kinds: str | None = None  # z. B. "plate,tile"
     color_categories: str | None = None  # z. B. "solid,pearl"
     exotic_colors: bool = False
     max_colors: int | None = None  # 0 = keine Begrenzung
+    color_ids: str | None = None  # eigene Palette als Farb-IDs, z. B. "0,15,71"
     # Stil und Relief
     style: str | None = None  # quadrat, formen, punkte, noppen
     relief: str | None = None  # ohne, motiv, hell, dunkel
@@ -681,11 +870,113 @@ class OverrideInput:
     strength: float | None = None
     color_distance: str | None = None  # cie76, ciede2000
     despeckle: bool | None = None  # einzelne Pixel entfernen (None = Standard)
+    smoothing: str | None = None  # aus, leicht, mittel, stark
     tiling_strategy: str | None = None
     outputs: str | None = None  # z. B. "preview_png,ldraw"
     output_dir: Path | None = None
     # Name des Mosaiks (Titelblatt, Ordnername); kein Konfigurationswert, gilt nur für den Lauf
     title: str | None = None
+
+
+# Formularfelder von ``POST /mosaike`` (auch CLI-Optionen und Presets) → Feld in OverrideInput.
+# Eine Tabelle für alle Oberflächen: Presets speichern genau diese Namen.
+FORM_FIELDS: Mapping[str, str] = {
+    "unterbau": "substrate",
+    "plattengroesse": "plate_studs",
+    "format": "art_format",
+    "platten": "plates",
+    "breite": "width_studs",
+    "hoehe": "height_studs",
+    "unterbaufarbe": "substrate_color_id",
+    "rahmen": "frame_width",
+    "rahmenfarbe": "frame_color_id",
+    "eckenfarbe": "frame_corner_color_id",
+    "rahmen_teile": "frame_part_kinds",
+    "rahmen_erhoehung": "frame_raise_plates",
+    "modus": "fit_mode",
+    "kontrast": "contrast",
+    "saettigung": "saturation",
+    "helligkeit": "brightness",
+    "farbfilter": "color_filter",
+    "filter_staerke": "filter_strength",
+    "drehen": "rotate",
+    "spiegeln": "mirror",
+    "ausschnitt": "crop",
+    "hintergrund": "background",
+    "hintergrundfarbe": "background_color_id",
+    "hintergrund_toleranz": "background_tolerance",
+    "hintergrund_staerke": "background_amount",
+    "teile": "part_kinds",
+    "farbkategorien": "color_categories",
+    "exotische_farben": "exotic_colors",
+    "max_farben": "max_colors",
+    "farb_ids": "color_ids",
+    "stil": "style",
+    "relief": "relief",
+    "relief_hoehe": "relief_levels",
+    "dithering": "dithering_method",
+    "staerke": "strength",
+    "farbabstand": "color_distance",
+    "aufraeumen": "despeckle",
+    "glaettung": "smoothing",
+    "zerlegung": "tiling_strategy",
+    "ausgaben": "outputs",
+    "titel": "title",
+}
+
+
+def override_input(values: Mapping[str, object]) -> OverrideInput:
+    """Formularfelder (deutsche Namen, ``None`` = nicht angegeben) → ``OverrideInput``.
+
+    Ganze Zahlen gelten auch für Kommazahl-Felder; sonst muss der Typ stimmen.
+
+    Raises:
+        ConfigError: Bei unbekannten Feldern oder falschem Typ.
+    """
+    unknown = sorted(set(values) - set(FORM_FIELDS))
+    if unknown:
+        raise ConfigError(f"Unbekannte Felder: {_join(unknown)}.")
+    hints = get_type_hints(OverrideInput)
+    fields: dict[str, Any] = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        attribute = FORM_FIELDS[name]
+        if not _fits(value, hints[attribute]):
+            raise ConfigError(f"Ungültiger Wert für „{name}“: {value!r}.")
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and _expects(hints[attribute], float)
+        ):
+            value = float(value)  # 1 → 1.0 für Kommazahl-Felder
+        fields[attribute] = value
+    return OverrideInput(**fields)
+
+
+def form_values(raw: OverrideInput) -> dict[str, object]:
+    """Gegenstück zu ``override_input``: nur angegebene Felder, mit deutschen Namen."""
+    values = {name: getattr(raw, attribute) for name, attribute in FORM_FIELDS.items()}
+    # exotische_farben ist ein Schalter: False heißt „nicht angegeben“
+    return {
+        name: value for name, value in values.items() if value is not None and value is not False
+    }
+
+
+def _expects(hint: object, kind: type) -> bool:
+    """True, wenn der Typ-Hinweis (z. B. ``float | None``) ``kind`` erlaubt."""
+    return kind in getattr(hint, "__args__", (hint,))
+
+
+def _fits(value: object, hint: object) -> bool:
+    """Prüft einen Wert gegen ``str``, ``int``, ``float`` oder ``bool`` (bool ist kein int)."""
+    if isinstance(value, bool):
+        return _expects(hint, bool)
+    if isinstance(value, int):
+        return _expects(hint, int) or _expects(hint, float)
+    if isinstance(value, float):
+        return _expects(hint, float)
+    return isinstance(value, str) and _expects(hint, str)
 
 
 def run_title(raw: OverrideInput, fallback: str) -> str:
@@ -725,9 +1016,20 @@ def parse_overrides(raw: OverrideInput) -> MosaicOverrides:
         fit_mode=_parse_label(FIT_MODE_LABELS, raw.fit_mode, "Modus"),
         contrast=raw.contrast,
         saturation=raw.saturation,
+        brightness=raw.brightness,
+        color_filter=_parse_label(COLOR_FILTER_LABELS, raw.color_filter, "Farbfilter"),
+        filter_strength=raw.filter_strength,
+        rotate=raw.rotate,
+        mirror=raw.mirror,
+        crop=parse_crop(raw.crop) if raw.crop else None,
+        background=_parse_label(BACKGROUND_LABELS, raw.background, "Hintergrund-Art"),
+        background_color_id=raw.background_color_id,
+        background_tolerance=raw.background_tolerance,
+        background_amount=raw.background_amount,
         part_kinds=parse_part_kinds(raw.part_kinds) if raw.part_kinds else None,
         color_categories=combine_categories(raw.color_categories, exotic=raw.exotic_colors),
         max_colors=raw.max_colors,
+        only_color_ids=parse_color_ids(raw.color_ids) if raw.color_ids else None,
         style=raw.style.strip().lower() if raw.style else None,
         relief=_parse_label(RELIEF_LABELS, raw.relief, "Relief-Art"),
         relief_levels=raw.relief_levels,
@@ -735,6 +1037,7 @@ def parse_overrides(raw: OverrideInput) -> MosaicOverrides:
         strength=raw.strength,
         color_distance=_parse_label(COLOR_DISTANCE_LABELS, raw.color_distance, "Farbabstand"),
         despeckle=raw.despeckle,
+        smoothing=_parse_label(SMOOTHING_LABELS, raw.smoothing, "Glättung"),
         tiling_strategy=raw.tiling_strategy,
         outputs=parse_names(raw.outputs) if raw.outputs else None,
         output_dir=raw.output_dir,
@@ -827,6 +1130,37 @@ def parse_color_categories(text: str) -> tuple[ColorCategory, ...]:
     """
     valid = {category.value: category for category in ColorCategory}
     return tuple(_lookup(valid, name, "Farbkategorie") for name in parse_names(text))
+
+
+def parse_crop(text: str) -> tuple[float, float, float, float]:
+    """Wandelt ``"10,0,80,100"`` (x, y, Breite, Höhe in Prozent) in ein Tupel um.
+
+    Raises:
+        ConfigError: Wenn es nicht genau vier Zahlen sind.
+    """
+    try:
+        values = tuple(float(part.replace("%", "")) for part in text.split(","))
+    except ValueError:
+        values = ()
+    if len(values) != CROP_VALUES:
+        raise ConfigError(
+            f"Ausschnitt bitte als „x,y,Breite,Höhe“ in Prozent angeben, z. B. „10,0,80,100“ "
+            f"(angegeben: {text})."
+        )
+    x, y, width, height = values
+    return x, y, width, height
+
+
+def parse_color_ids(text: str) -> tuple[int, ...]:
+    """Wandelt ``"0, 15, 71"`` in Farb-IDs um.
+
+    Raises:
+        ConfigError: Wenn ein Eintrag keine ganze Zahl ist.
+    """
+    names = parse_names(text)
+    if not all(name.lstrip("-").isdigit() for name in names):
+        raise ConfigError(f"Farb-IDs bitte als Zahlen mit Komma angeben, z. B. „0,15,71“ ({text}).")
+    return tuple(int(name) for name in names)
 
 
 def parse_fit_mode(text: str) -> FitMode:
