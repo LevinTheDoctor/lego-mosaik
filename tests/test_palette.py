@@ -5,8 +5,14 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from lego_mosaik.domain.models import ColorCategory, LegoColor, PartCatalog, PartKind
-from lego_mosaik.domain.palette import build_palette, most_used_colors
+from lego_mosaik.domain.models import (
+    ColorCategory,
+    LegoColor,
+    PartCatalog,
+    PartKind,
+    color_family_key,
+)
+from lego_mosaik.domain.palette import build_palette, color_codes, most_used_colors
 
 
 def _ids(colors: Sequence[LegoColor]) -> list[int]:
@@ -59,3 +65,23 @@ def test_most_used_colors_breaks_ties_by_id(catalog: PartCatalog) -> None:
     grid = np.array([[3, 3, 3], [1, 2, 0]], dtype=np.intp)
     # White kommt dreimal vor; Black, Blue, Red je einmal → Gleichstand, kleinste ID gewinnt
     assert _ids(most_used_colors(grid, palette, 2)) == [0, 15]
+
+
+def test_color_codes_are_short_unique_and_follow_the_shown_name() -> None:
+    names = ["Black", "Blue", "Dark Blue", "Dark Brown", "Light Bluish Gray", "Dark Bluish Gray"]
+    colors = [LegoColor(i, name, (0, 0, 0), False, i) for i, name in enumerate(names)]
+    codes = color_codes(colors)
+    assert codes == {0: "Bla", 1: "Blu", 2: "DBl", 3: "DBr", 4: "LBG", 5: "DBG"}
+    official = dataclasses.replace(colors[4], lego_name="Medium Stone Grey")
+    assert color_codes([official])[4] == "MSG"  # Kürzel passt zum angezeigten LEGO-Namen
+
+
+def test_color_family_puts_similar_colors_together() -> None:
+    def color(color_id: int, rgb: tuple[int, int, int]) -> LegoColor:
+        return LegoColor(color_id, str(color_id), rgb, False, color_id)
+
+    white, gray, black = color(1, (255, 255, 255)), color(2, (160, 165, 169)), color(3, (5, 19, 29))
+    red, blue = color(4, (201, 26, 9)), color(5, (0, 85, 191))
+    light_blue = color(6, (159, 195, 233))
+    ordered = sorted([blue, red, black, light_blue, white, gray], key=color_family_key)
+    assert ordered == [white, gray, black, red, light_blue, blue]

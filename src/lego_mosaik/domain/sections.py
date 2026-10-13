@@ -84,6 +84,7 @@ class StepKind(StrEnum):
     FRAME_SUPPORT = "frame_support"  # Plates unter einem erhöhten Rahmen
     FRAME = "frame"  # sichtbarer Rahmen
     RELIEF = "relief"  # Stützlage unter erhöhten Bildteilen eines Abschnitts
+    UNDERLAY = "underlay"  # farbige Plates unter den Formteilen eines Abschnitts
     SECTION = "section"  # einige Zeilen eines Bildabschnitts
 
 
@@ -134,6 +135,7 @@ def assembly_steps(
         section_studs=section_studs,
         rows_per_step=rows_per_step,
         relief=mosaic.relief,
+        underlays=mosaic.underlays,
     )
     return tuple(steps)
 
@@ -151,35 +153,50 @@ def build_steps(
     section_studs: int,
     rows_per_step: int,
     relief: Sequence[Placement] = (),
+    underlays: Sequence[Placement] = (),
 ) -> tuple[BuildStep, ...]:
     """Teilt die Bildteile in Bauschritte: erst nach Abschnitt, darin nach Zeilenblöcken.
 
     Ein Teil gehört zum Abschnitt und Zeilenblock seiner Startzelle. Relief-Stützteile
-    kommen in jedem Abschnitt zuerst, eine Lage pro Schritt (von unten nach oben).
-    Innerhalb eines Schritts wird nach Farbe, dann Position sortiert, damit man eine
-    Farbe nach der anderen verbauen kann. Leere Schritte entfallen.
+    kommen in jedem Abschnitt zuerst, eine Lage pro Schritt (von unten nach oben), dann
+    in einem Schritt die Unterlagen der Formteile, dann das Bild. Innerhalb eines
+    Schritts wird nach Farbe, dann Position sortiert, damit man eine Farbe nach der
+    anderen verbauen kann. Leere Schritte entfallen.
     """
     sections = split_sections(width, height, section_studs)
 
-    # Schlüssel (Abschnitt, Phase, Nummer): Phase 0 = Relief-Lage, 1 = Zeilenblock des Bilds
+    # Schlüssel (Abschnitt, Phase, Nummer): Phase 0 = Relief-Lage, 1 = Unterlagen,
+    # 2 = Zeilenblock des Bilds
     def relief_key(placement: Placement) -> tuple[int, int, int]:
         index = section_index(placement.row, placement.col, width, section_studs)
-        return index, 0, placement.bottom_ldu // PLATE_HEIGHT_LDU
+        return index, _RELIEF, placement.bottom_ldu // PLATE_HEIGHT_LDU
+
+    def underlay_key(placement: Placement) -> tuple[int, int, int]:
+        return section_index(placement.row, placement.col, width, section_studs), _UNDERLAY, 0
 
     def image_key(placement: Placement) -> tuple[int, int, int]:
         index = section_index(placement.row, placement.col, width, section_studs)
         # % ist der Rest der Division: Zeile innerhalb des Abschnitts; // teilt in Blöcke
-        return index, 1, (placement.row % section_studs) // rows_per_step
+        return index, _IMAGE, (placement.row % section_studs) // rows_per_step
 
-    keyed = [(relief_key(p), p) for p in relief] + [(image_key(p), p) for p in placements]
+    keyed = [(relief_key(p), p) for p in relief]
+    keyed += [(underlay_key(p), p) for p in underlays]
+    keyed += [(image_key(p), p) for p in placements]
     keyed.sort(key=lambda item: (*item[0], item[1].color.id, item[1].row, item[1].col))
     # groupby fasst aufeinanderfolgende Elemente mit gleichem Schlüssel zusammen
     # (funktioniert nur, weil vorher nach demselben Schlüssel sortiert wurde)
     steps = []
     for (index, phase, number), group in groupby(keyed, key=lambda item: item[0]):
         parts = tuple(placement for _, placement in group)
-        if phase == 0:
-            steps.append(BuildStep(StepKind.RELIEF, parts, section=sections[index], level=number))
+        section = sections[index]
+        if phase == _RELIEF:
+            steps.append(BuildStep(StepKind.RELIEF, parts, section=section, level=number))
+        elif phase == _UNDERLAY:
+            steps.append(BuildStep(StepKind.UNDERLAY, parts, section=section))
         else:
-            steps.append(BuildStep(StepKind.SECTION, parts, section=sections[index], block=number))
+            steps.append(BuildStep(StepKind.SECTION, parts, section=section, block=number))
     return tuple(steps)
+
+
+# Phasen innerhalb eines Abschnitts (Reihenfolge beim Bauen)
+_RELIEF, _UNDERLAY, _IMAGE = 0, 1, 2

@@ -5,6 +5,7 @@ Alle Klassen sind ``frozen``: Einmal erzeugt, ändern sie sich nie. Das macht si
 sicher teilbar zwischen Threads (FastAPI-Threadpool) und leicht testbar.
 """
 
+import colorsys
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -156,6 +157,7 @@ class LegoColor:
         category: Oberflächen-Kategorie (solid, metallic, pearl, …).
         bricklink_code: BrickLink-Farbcode, falls bekannt (für die Wanted List).
         lego_name: Offizieller LEGO-Farbname, falls bekannt (z. B. "Bright Red").
+        last_year: Letztes Jahr, in dem die Farbe in einem Set vorkam (``None`` = unbekannt).
     """
 
     id: int
@@ -166,6 +168,7 @@ class LegoColor:
     category: ColorCategory = ColorCategory.SOLID
     bricklink_code: int | None = None
     lego_name: str | None = None
+    last_year: int | None = None
 
     @property
     def hex(self) -> str:
@@ -355,8 +358,8 @@ class Mosaic:
     Von unten nach oben: Unterbau (Grundplatten, große Platten oder Art-Paneele) →
     Verbinder (Technic-Pins zwischen den Paneelen) bzw. Verbindungslage aus Plates →
     Stützteile unter einem erhöhten Rahmen →
-    Rahmen → Relief-Stützlagen → Bild. Rahmen und Bild bilden zusammen die sichtbare
-    Oberfläche.
+    Rahmen → Relief-Stützlagen → Unterlagen der Formteile → Bild. Rahmen und Bild bilden
+    zusammen die sichtbare Oberfläche; die Unterlagen sind in den Lücken der Formteile zu sehen.
 
     Attributes:
         title: Anzeigename, meist der Bilddateiname ohne Endung.
@@ -367,8 +370,10 @@ class Mosaic:
         placements: Die Teile des Bilds innerhalb des Rahmens (werden pro Abschnitt gebaut).
         frame: Die sichtbaren Teile des Rahmens.
         supports: Unsichtbare Plates unter einem erhöhten Rahmen.
-        relief: Plates unter erhöhten Bildteilen (Relief wie bei Brick Sketches); sie
-            werden pro Abschnitt vor dem Bild gebaut.
+        relief: Plates und Bricks unter erhöhten Bildteilen (Relief wie bei Brick Sketches);
+            sie werden pro Abschnitt vor dem Bild gebaut.
+        underlays: Farbige Plates unter Formteilen; ihre Farbe zeigt sich in den Lücken
+            neben runden und schrägen Teilen (Brick-Sketches-Stil).
         bond: Verbindungslage aus Plates auf Lücke über mehreren großen Unterbau-Platten;
             alles andere liegt eine Plate höher.
         substrate: Grundplatten bzw. Art-Paneele unter dem Mosaik (leer = ohne Unterbau).
@@ -389,6 +394,7 @@ class Mosaic:
     substrate: tuple[Placement, ...] = ()
     connectors: tuple[Placement, ...] = ()
     relief: tuple[Placement, ...] = ()
+    underlays: tuple[Placement, ...] = ()
     bond: tuple[Placement, ...] = ()
     element_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
@@ -401,7 +407,7 @@ class Mosaic:
     @property
     def stacked(self) -> tuple[Placement, ...]:
         """Alles über dem Unterbau, von unten nach oben (für Draufsichten und 3D-Bilder)."""
-        return self.bond + self.supports + self.relief + self.surface
+        return self.bond + self.supports + self.relief + self.underlays + self.surface
 
     @property
     def all_parts(self) -> tuple[Placement, ...]:
@@ -413,10 +419,18 @@ class Mosaic:
         return self.palette[int(self.color_grid[row, col])]
 
     def used_colors(self) -> tuple[LegoColor, ...]:
-        """Tatsächlich sichtbare Farben, sortiert nach Rebrickable-ID."""
+        """Sichtbare Farben (Oberfläche und Unterlagen), sortiert nach Rebrickable-ID."""
         # set-Comprehension entfernt Duplikate, sorted macht die Reihenfolge deterministisch
-        used = {placement.color for placement in self.surface}
+        used = {placement.color for placement in self.surface + self.underlays}
         return tuple(sorted(used, key=lambda color: color.id))
+
+    def part_colors(self) -> tuple[LegoColor, ...]:
+        """Alle Farben der Teileliste (auch Unterbau und Stützlagen), sortiert nach ID.
+
+        Die einzige Quelle für „Farben“ auf dem Titelblatt und in den Kennzahlen: So
+        stimmt die Zahl immer mit der Teileliste überein.
+        """
+        return tuple(sorted({p.color for p in self.all_parts}, key=lambda color: color.id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,9 +469,39 @@ class PartsList:
         return sum(entry.quantity for entry in self.entries)
 
 
-def _parts_list_sort_key(entry: PartsListEntry) -> tuple[int, str]:
-    """Sortierschlüssel: Tupel werden elementweise verglichen, also erst Farbe, dann Teil."""
-    return entry.color.id, entry.part.part_num
+def _parts_list_sort_key(entry: PartsListEntry) -> tuple[object, ...]:
+    """Erst nach Farbfamilie (Grautöne, dann Rot, Gelb, Grün, Blau, …), dann nach Teil.
+
+    Innerhalb einer Farbe: Teilart, dann Größe (kleine Teile zuerst). Tupel werden
+    elementweise verglichen.
+    """
+    part = entry.part
+    return (
+        *color_family_key(entry.color),
+        part.kind.value,
+        part.width_studs,
+        part.length_studs,
+        part.part_num,
+    )
+
+
+NEUTRAL_SATURATION = 0.18  # darunter gilt eine Farbe als Grauton (Weiß bis Schwarz)
+NEAR_BLACK = 0.08  # so dunkle Farben zählen auch als Grauton (z. B. Black mit Blaustich)
+HUE_FAMILIES = 12  # Farbkreis in 30°-Schritte: Rot, Orange, Gelb, …
+RGB_MAX = 255
+
+
+def color_family_key(color: LegoColor) -> tuple[int, int, float, int]:
+    """Sortierschlüssel nach Farbfamilien, damit ähnliche Töne nebeneinanderstehen.
+
+    Zuerst alle Grautöne von Weiß bis Schwarz, dann die bunten Farben im Farbkreis
+    (Rot → Orange → Gelb → Grün → Blau → Violett → Pink), jeweils von hell nach dunkel.
+    """
+    red, green, blue = (channel / RGB_MAX for channel in color.rgb)
+    hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+    if saturation < NEUTRAL_SATURATION or lightness < NEAR_BLACK:
+        return 0, 0, -lightness, color.id
+    return 1, int(hue * HUE_FAMILIES) % HUE_FAMILIES, -lightness, color.id
 
 
 @dataclass(frozen=True, slots=True)

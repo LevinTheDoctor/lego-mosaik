@@ -259,6 +259,12 @@ GROUPS: tuple[tuple[str, tuple[_Field, ...]], ...] = (
                 lambda c, i: c.dithering.strength,
             ),
             _Field(
+                "despeckle",
+                "Einzelne Pixel aufräumen (ja/nein; gut für Comics, weniger für Fotos)",
+                _yes_no,
+                lambda c, i: "ja" if c.dithering.despeckle else "nein",
+            ),
+            _Field(
                 "color_distance",
                 "Farbabstand: cie76 (schnell) oder ciede2000 (genau)",
                 str,

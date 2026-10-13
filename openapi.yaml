@@ -374,6 +374,12 @@ components:
           - type: 'null'
           title: Farbabstand
           description: cie76 oder ciede2000
+        aufraeumen:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Aufraeumen
+          description: Einzelne Pixel durch die Nachbarfarbe ersetzen (Comics, Logos)
         zerlegung:
           anyOf:
           - type: string

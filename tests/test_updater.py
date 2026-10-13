@@ -22,7 +22,9 @@ type Handler = Callable[[httpx.Request], httpx.Response]
 
 @pytest.fixture
 def config(tmp_path: Path) -> SourceConfig:
-    return SourceConfig(data_dir=tmp_path / "rebrickable", files=("colors.csv.gz",))
+    return SourceConfig(
+        data_dir=tmp_path / "rebrickable", files=("colors.csv.gz",), optional_files=()
+    )
 
 
 def _serve(requests: list[httpx.Request]) -> Handler:
@@ -122,3 +124,18 @@ def test_network_error_gives_german_message(config: SourceConfig) -> None:
     report = build_updater(config, httpx.MockTransport(refuse)).update()
     assert [update.status for update in report.files] == [FileStatus.FAILED] * 2
     assert "Internetverbindung" in report.files[0].message
+
+
+def test_failed_optional_file_keeps_catalog_usable(config: SourceConfig) -> None:
+    _write_old_file(config, age_days=30)
+    optional = dataclasses.replace(config, optional_files=("inventory_parts.csv.gz",))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("inventory_parts.csv.gz"):
+            raise httpx.ConnectError("offline", request=request)
+        return httpx.Response(200, content=gzip.compress(NEW_CONTENT))
+
+    report = build_updater(optional, httpx.MockTransport(handler)).update()
+    statuses = {update.file_name: update.status for update in report.files}
+    assert statuses["inventory_parts.csv.gz"] is FileStatus.FAILED
+    report.raise_if_unusable()  # die Set-Inventare sind optional

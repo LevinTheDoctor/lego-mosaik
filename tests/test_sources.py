@@ -1,15 +1,16 @@
 """Tests für das Einlesen der Rebrickable-CSV-Dumps."""
 
 import dataclasses
+from datetime import date
 from pathlib import Path
 
 import pytest
-from conftest import make_catalog, write_csv
+from conftest import COLOR_ROWS, make_catalog, write_csv
 
 from lego_mosaik.config import SourceConfig
 from lego_mosaik.domain.errors import CatalogError
 from lego_mosaik.main import build_catalog_source
-from lego_mosaik.sources.rebrickable_csv import parse_hex_rgb
+from lego_mosaik.sources.rebrickable_csv import RebrickableCsvSource, parse_hex_rgb
 
 
 def test_loads_expected_catalog(source_config: SourceConfig) -> None:
@@ -75,6 +76,68 @@ def test_invalid_row_reports_line_number(source_config: SourceConfig, tmp_path: 
     config = dataclasses.replace(source_config, geometry_file=geometry)
     with pytest.raises(CatalogError, match=r"kaputt\.csv, Zeile 3"):
         build_catalog_source(config).load_catalog()
+
+
+def _recent_source(config: SourceConfig) -> RebrickableCsvSource:
+    """Quelle mit „nur aktuelle Teile“ (3 Jahre) und fester Uhr im Jahr 2026."""
+    return RebrickableCsvSource(
+        data_dir=config.data_dir,
+        geometry_file=config.geometry_file,
+        color_mapping_file=config.color_mapping_file,
+        studio_color_file=None,
+        category_keywords=config.category_keywords,
+        recent_years=3,
+        today=lambda: date(2026, 6, 1),
+    )
+
+
+def _write_color_years(config: SourceConfig, last_years: dict[int, int]) -> None:
+    """colors.csv mit Spalte y2 (letztes Jahr der Farbe); fehlende Farben: 2026."""
+    rows = [
+        (cid, name, rgb, str(trans), 1990, last_years.get(cid, 2026))
+        for cid, name, rgb, trans in COLOR_ROWS
+    ]
+    header = ("id", "name", "rgb", "is_trans", "y1", "y2")
+    write_csv(config.data_dir / "colors.csv.gz", header, rows, compressed=True)
+
+
+def test_retired_colors_are_dropped_without_inventories(source_config: SourceConfig) -> None:
+    _write_color_years(source_config, {2: 2005})  # Green gibt es seit 2005 nicht mehr
+    catalog = _recent_source(source_config).load_catalog()
+    assert catalog.colors[2].last_year == 2005
+    assert ("3023", 2) not in catalog.available
+    assert ("3023", 15) in catalog.available
+
+
+def test_only_combinations_from_recent_sets(source_config: SourceConfig) -> None:
+    data_dir = source_config.data_dir
+    sets = [("alt-1", 2010), ("neu-1", 2025)]
+    write_csv(
+        data_dir / "sets.csv.gz",
+        ("set_num", "name", "year"),
+        [(n, n, y) for n, y in sets],
+        compressed=True,
+    )
+    write_csv(
+        data_dir / "inventories.csv.gz",
+        ("id", "version", "set_num"),
+        [(1, 1, "alt-1"), (2, 1, "neu-1")],
+        compressed=True,
+    )
+    inventory = [(1, "3024", 4), (2, "3024", 15), (2, "3023", 15), (1, "3023", 4)]
+    write_csv(
+        data_dir / "inventory_parts.csv.gz",
+        ("inventory_id", "part_num", "color_id", "quantity", "is_spare"),
+        [(*row, 1, "False") for row in inventory],
+        compressed=True,
+    )
+    catalog = _recent_source(source_config).load_catalog()
+    # Plate 1 × 1 in Rot nur aus einem Set von 2010 → ausgelaufen; in Weiß aktuell
+    assert ("3024", 4) not in catalog.available
+    assert ("3024", 15) in catalog.available
+    assert ("3024", 4) not in catalog.element_ids
+    # Teile, die in keinem aktuellen Set vorkommen (z. B. Paneele), behalten ihre Farben
+    assert ("65803", 0) in catalog.available
 
 
 def test_parse_hex_rgb() -> None:

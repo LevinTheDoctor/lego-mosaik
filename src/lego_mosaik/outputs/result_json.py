@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from lego_mosaik.domain.models import Mosaic, PartsList
 logger = logging.getLogger(__name__)
 
 FILE_NAME = "ergebnis.json"
+INSTRUCTION_PAGE = re.compile(r"anleitung_\d+\.png")
 
 
 class ResultJsonWriter:
@@ -26,6 +28,10 @@ class ResultJsonWriter:
         path = target_dir / FILE_NAME
         files = sorted({file.name for file in target_dir.iterdir() if file.is_file()} | {FILE_NAME})
         result = build_result(mosaic) | {"dateien": files}  # | verbindet zwei dicts (Python 3.9+)
+        statistik = result.get("statistik")
+        if isinstance(statistik, dict):  # Seiten der Anleitung (0 ohne Anleitung)
+            pages = sum(1 for name in files if INSTRUCTION_PAGE.fullmatch(name))
+            result["statistik"] = statistik | {"seiten": pages}
         # ensure_ascii=False schreibt Umlaute direkt statt als ü
         path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         logger.info("Ergebnis geschrieben: %s", path)

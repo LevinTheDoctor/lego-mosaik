@@ -26,7 +26,8 @@ def test_parts_list_aggregates_and_sorts(catalog: PartCatalog) -> None:
     parts_list = PartsList.from_placements(placements)
     assert parts_list.total_quantity == len(placements)
     rows = [(e.color.id, e.part.part_num, e.quantity) for e in parts_list.entries]
-    assert rows == [(0, "3023", 1), (0, "3024", 1), (15, "3024", 2)]
+    # nach Farbfamilie (Grautöne von Weiß bis Schwarz), dann Größe
+    assert rows == [(15, "3024", 2), (0, "3024", 1), (0, "3023", 1)]
 
 
 def test_catalog_lists_parts_in_color(catalog: PartCatalog) -> None:

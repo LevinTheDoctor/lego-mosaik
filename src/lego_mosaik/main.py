@@ -90,6 +90,7 @@ CONFIG = AppConfig(
         include_color_ids=(),  # einzelne Farben trotz Kategorie erlauben
         exclude_color_ids=(),  # Farben, die nie verwendet werden
         max_colors=None,  # optional auf N häufigste Farben begrenzen
+        min_color_share=0.002,  # Farben auf weniger als 0,2 % der Fläche zusammenlegen
     ),
     dithering=DitheringConfig(
         method="floyd_steinberg",  # Schlüssel aus der Registry (lego-mosaik verfahren)
@@ -98,6 +99,7 @@ CONFIG = AppConfig(
         serpentine=True,  # Zeilen abwechselnd links/rechts abarbeiten
         bayer_size=4,  # nur "ordered": 2, 4 oder 8
         spread=32.0,  # nur "ordered": Stärke in RGB-Stufen
+        despeckle=False,  # einzelne Pixel entfernen (gut für Comics, --aufraeumen)
     ),
     shapes=ShapeConfig(
         style="formen",  # formen (Rundungen, Wedges an Kanten), quadrat, punkte, noppen
@@ -128,7 +130,12 @@ CONFIG = AppConfig(
         view_azimuth_deg=0.0,  # Kamera: 0 = gerade von vorne (Zeilen bleiben abzählbar)
         step_render_height_px=900,  # höchstens so hoch ist eine Schrittansicht
     ),
-    source=SourceConfig(data_dir=Path("daten/rebrickable"), max_age_days=7, auto_update=True),
+    source=SourceConfig(
+        data_dir=Path("daten/rebrickable"),
+        max_age_days=7,
+        auto_update=True,
+        recent_years=3,  # nur Teile in Farben aus Sets der letzten 3 Jahre (None = alle)
+    ),
     output_dir=Path("ausgabe"),
     server=ServerConfig(host="127.0.0.1", port=8000, max_upload_mb=20, update_interval_hours=24),
 )
@@ -144,6 +151,7 @@ def build_catalog_source(source: SourceConfig) -> RebrickableCsvSource:
         color_mapping_file=source.color_mapping_file,
         studio_color_file=source.studio_color_file,
         category_keywords=source.category_keywords,
+        recent_years=source.recent_years,
     )
 
 
@@ -155,6 +163,7 @@ def build_updater(
         data_dir=source.data_dir,
         base_url=source.base_url,
         file_names=source.files,
+        optional_file_names=source.optional_files,
         max_age_days=source.max_age_days,
         timeout_seconds=source.timeout_seconds,
         user_agent=source.user_agent,
@@ -191,6 +200,7 @@ def build_components(config: AppConfig) -> PipelineComponents:
         tiler=resolve(TILING_STRATEGIES, config.tiling.strategy, "Zerlegungsverfahren")(config),
         frame_tiler=build_tiler(config, frame_part_kinds(config)),
         support_tiler=build_tiler(config, (PartKind.PLATE,)),  # Stützlagen brauchen Noppen
+        brick_tiler=build_tiler(config, (PartKind.BRICK,)),  # Relief: ein Brick statt 3 Plates
         bond_tiler=build_tiler(config, (PartKind.PLATE,), max_part_length=BOND_PART_STUDS),
         shaper=resolve(SHAPERS, config.shapes.style, "Stil")(config),
         writers=tuple(

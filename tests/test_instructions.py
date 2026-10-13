@@ -16,10 +16,11 @@ from lego_mosaik.outputs.instructions_png import (
     PAGE_BREAK,
     InstructionsWriter,
     PageLayout,
+    _DocumentBuilder,
     build_pages,
     paginate,
 )
-from lego_mosaik.outputs.iso_render import HIGHLIGHT_RGB
+from lego_mosaik.outputs.iso_render import HIGHLIGHT_RGB, Area
 from lego_mosaik.outputs.plans import connection_plan
 
 LAYOUT = PageLayout(
@@ -110,3 +111,34 @@ def test_connection_plan_marks_pins(art_mosaic: Mosaic) -> None:
     assert plan.size == (32 * 10, 16 * 10)
     pixels = np.asarray(plan).reshape(-1, 3)
     assert (pixels == HIGHLIGHT_RGB).all(axis=1).any()  # Pins orange eingezeichnet
+
+
+def test_overview_names_real_step_numbers(art_mosaic: Mosaic) -> None:
+    builder = _DocumentBuilder(art_mosaic, LAYOUT)
+    order = builder.build_order()
+    assert order[0] == ("Schritt 1", "2 LEGO-Art-Paneele 16 × 16 auslegen")
+    assert order[1][0] == "Schritt 2"
+    assert order[2] == ("Schritte 3–4", "Rahmen bauen")  # Rahmen-Unterbau und Rahmen
+    assert order[3][0] == f"Schritte 5–{len(builder.steps)}"
+    # derselbe Name im ersten Bauschritt wie auf der Übersicht
+    assert builder.base_title(builder.steps[0]) == order[0][1]
+
+
+def test_section_subtitles_do_not_overlap(art_mosaic: Mosaic) -> None:
+    builder = _DocumentBuilder(art_mosaic, LAYOUT)
+    first = [step for step in builder.steps if step.section and step.section.number == 1]
+    subtitles = [builder.section_subtitle(step, step.section) for step in first if step.section]
+    count = len(first)
+    assert subtitles == [f"Abschnitt 1/8 · Teil {n} von {count}" for n in range(1, count + 1)]
+
+
+def test_step_view_is_top_down_with_ruler(art_mosaic: Mosaic) -> None:
+    builder = _DocumentBuilder(art_mosaic, LAYOUT)
+    step = next(step for step in builder.steps if step.kind is StepKind.SECTION)
+    assert step.section is not None
+    area = Area(step.section.row, step.section.col, step.section.rows, step.section.cols)
+    view = builder.top_view(step.placements, step.placements, area, 500, 500, 1)
+    # Draufsicht: quadratische Abschnitte bleiben quadratisch (plus Lineal oben und links)
+    assert abs(view.width - view.height) <= 1
+    pixels = np.asarray(view).reshape(-1, 3)
+    assert (pixels == HIGHLIGHT_RGB).all(axis=1).any()  # neue Teile orange umrandet

@@ -257,6 +257,15 @@ def _register_create(
             str | None,
             typer.Option(help="cie76 (schnell) oder ciede2000.", rich_help_panel=METHOD_PANEL),
         ] = None,
+        aufraeumen: Annotated[
+            bool | None,
+            typer.Option(
+                "--aufraeumen/--nicht-aufraeumen",
+                help="Einzelne Pixel durch die Nachbarfarbe ersetzen: weniger Rauschen und "
+                "1×1-Teile (gut für Comics und Logos).",
+                rich_help_panel=METHOD_PANEL,
+            ),
+        ] = None,
         zerlegung: Annotated[
             str | None, typer.Option(help="Zerlegungsverfahren.", rich_help_panel=METHOD_PANEL)
         ] = None,
@@ -302,6 +311,7 @@ def _register_create(
             dithering_method=dithering,
             strength=staerke,
             color_distance=farbabstand,
+            despeckle=aufraeumen,
             tiling_strategy=zerlegung,
             outputs=ausgaben,
             output_dir=ziel,

@@ -38,6 +38,8 @@ MAX_PORT = 65535
 PLAIN_STYLE = "quadrat"
 # Stile, bei denen jede Noppe rund ist: Zwischen den Punkten muss ein Unterbau zu sehen sein
 DOT_STYLES = frozenset({"punkte", "noppen"})
+MAX_RECENT_YEARS = 100
+MAX_MIN_COLOR_SHARE = 0.1  # mehr als 10 % Mindestanteil würde ganze Bildteile umfärben
 MAX_SUBSAMPLE = 12  # Teilpixel pro Noppe und Richtung bei der Formwahl
 
 
@@ -164,6 +166,9 @@ class PaletteConfig:
     include_color_ids: tuple[int, ...] = ()  # einzelne Farben trotz Kategorie erlauben
     exclude_color_ids: tuple[int, ...] = ()  # hat Vorrang vor allem anderen
     max_colors: int | None = None  # None = keine Begrenzung
+    # Farben, die nach dem Dithering auf weniger als diesem Anteil der Bildfläche liegen,
+    # fallen weg; das Bild wird ohne sie neu gedithert (0 = alle Farben behalten)
+    min_color_share: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +181,9 @@ class DitheringConfig:
     serpentine: bool = True  # Zeilen abwechselnd links/rechts abarbeiten
     bayer_size: int = 4  # nur für "ordered": 2, 4 oder 8
     spread: float = 32.0  # nur für "ordered": Stärke des Schwellwert-Offsets in RGB-Stufen
+    # Einzelne Pixel (kein Nachbar in derselben Farbe) durch die Nachbarfarbe ersetzen:
+    # weniger Rauschen und 1×1-Teile, gut für Comics und Logos, weniger für Fotos
+    despeckle: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +299,15 @@ class SourceConfig:
     category_keywords: tuple[tuple[str, ColorCategory], ...] = DEFAULT_CATEGORY_KEYWORDS
     base_url: str = "https://cdn.rebrickable.com/media/downloads/"
     files: tuple[str, ...] = ("colors.csv.gz", "parts.csv.gz", "elements.csv.gz")
+    # Set-Inventare (ca. 15 MB): erkennen ausgelaufene Teil-Farb-Kombinationen. Fehlen sie,
+    # läuft alles weiter; Altfarben werden dann nur über das letzte Jahr der Farbe erkannt.
+    optional_files: tuple[str, ...] = (
+        "sets.csv.gz",
+        "inventories.csv.gz",
+        "inventory_parts.csv.gz",
+    )
+    # Nur Teile in Farben aus Sets der letzten so vielen Jahre (None = auch historische)
+    recent_years: int | None = 3
     max_age_days: int = 7
     auto_update: bool = True
     timeout_seconds: float = 60.0
@@ -378,6 +395,7 @@ class MosaicOverrides:
     dithering_method: str | None = None
     strength: float | None = None
     color_distance: ColorDistance | None = None
+    despeckle: bool | None = None
     tiling_strategy: str | None = None
     outputs: tuple[str, ...] | None = None
     output_dir: Path | None = None
@@ -427,6 +445,7 @@ def apply_overrides(config: AppConfig, overrides: MosaicOverrides) -> AppConfig:
             method=o.dithering_method,
             strength=o.strength,
             color_distance=o.color_distance,
+            despeckle=o.despeckle,
         ),
         shapes=_merged(config.shapes, style=o.style),
         relief=_merged(config.relief, mode=o.relief, levels=o.relief_levels),
@@ -484,6 +503,9 @@ def validate_config(config: AppConfig) -> None:
     _check_positive("Sättigung", config.mosaic.saturation)
     _check_part_kinds(config.palette.part_kinds)
     _check_unique_non_empty("Farbkategorien", config.palette.color_categories)
+    _check_range(
+        "Mindestanteil einer Farbe", config.palette.min_color_share, 0.0, MAX_MIN_COLOR_SHARE
+    )
     if config.palette.max_colors is not None:
         _check_range("Maximale Farbanzahl", config.palette.max_colors, 1, MAX_STUDS * MAX_STUDS)
     if config.dithering.bayer_size not in BAYER_SIZES:
@@ -498,6 +520,8 @@ def validate_config(config: AppConfig) -> None:
     _check_range("Kamera-Höhenwinkel", config.instructions.view_elevation_deg, 10.0, 90.0, "Grad")
     _check_range("Kamera-Drehung", config.instructions.view_azimuth_deg, 0.0, 45.0, "Grad")
     _check_range("Supersampling", config.instructions.supersample, 1, 4)
+    if config.source.recent_years is not None:
+        _check_range("Aktuelle Jahre", config.source.recent_years, 1, MAX_RECENT_YEARS)
     _check_range("Port", config.server.port, MIN_PORT, MAX_PORT)
     _check_range("Upload-Grenze", config.server.max_upload_mb, 1, 1024, "MB")
 
@@ -633,6 +657,7 @@ class OverrideInput:
     dithering_method: str | None = None
     strength: float | None = None
     color_distance: str | None = None  # cie76, ciede2000
+    despeckle: bool | None = None  # einzelne Pixel entfernen (None = Standard)
     tiling_strategy: str | None = None
     outputs: str | None = None  # z. B. "preview_png,ldraw"
     output_dir: Path | None = None
@@ -686,6 +711,7 @@ def parse_overrides(raw: OverrideInput) -> MosaicOverrides:
         dithering_method=raw.dithering_method,
         strength=raw.strength,
         color_distance=_parse_label(COLOR_DISTANCE_LABELS, raw.color_distance, "Farbabstand"),
+        despeckle=raw.despeckle,
         tiling_strategy=raw.tiling_strategy,
         outputs=parse_names(raw.outputs) if raw.outputs else None,
         output_dir=raw.output_dir,

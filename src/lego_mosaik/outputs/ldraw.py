@@ -105,7 +105,7 @@ def ldraw_lines(
 def step_comment(step: BuildStep) -> str:
     """Kurzer deutscher Name des Schritts, z. B. „Abschnitt 3“."""
     match step.kind:
-        case StepKind.SECTION | StepKind.RELIEF if step.section is not None:
+        case StepKind.SECTION | StepKind.RELIEF | StepKind.UNDERLAY if step.section is not None:
             return f"Abschnitt {step.section.number}"
         case StepKind.SUBSTRATE:
             return _SUBSTRATE_COMMENTS.get(step.placements[0].part.kind, "Unterbau")

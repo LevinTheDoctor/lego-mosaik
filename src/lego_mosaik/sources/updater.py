@@ -32,6 +32,8 @@ class CatalogUpdater:
         data_dir: Zielordner der Dateien.
         base_url: URL-Präfix, an das der Dateiname angehängt wird.
         file_names: Herunterzuladende Dateien, z. B. ``("colors.csv.gz", …)``.
+        optional_file_names: Weitere Dateien, ohne die der Katalog trotzdem funktioniert;
+            schlägt ihr Download fehl, bleibt der Katalog nutzbar.
         max_age_days: Ab diesem Alter gilt eine Datei als veraltet.
         timeout_seconds: Timeout pro HTTP-Anfrage.
         user_agent: Eigener User-Agent, damit Rebrickable den Client erkennt.
@@ -48,11 +50,13 @@ class CatalogUpdater:
         max_age_days: int,
         timeout_seconds: float,
         user_agent: str,
+        optional_file_names: Sequence[str] = (),
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._base_url = base_url
-        self._file_names = tuple(file_names)
+        self._file_names = (*file_names, *optional_file_names)
+        self._optional = frozenset(optional_file_names)
         self._max_age_days = max_age_days
         self._timeout_seconds = timeout_seconds
         self._user_agent = user_agent
@@ -121,7 +125,8 @@ class CatalogUpdater:
             temp.unlink(missing_ok=True)
             message = _describe_error(error)
             logger.warning("Download von %s fehlgeschlagen: %s", file_name, message)
-            return FileUpdate(file_name, FileStatus.FAILED, message, usable=target.exists())
+            usable = target.exists() or file_name in self._optional
+            return FileUpdate(file_name, FileStatus.FAILED, message, usable=usable)
         return FileUpdate(file_name, FileStatus.DOWNLOADED, "Neu heruntergeladen.", usable=True)
 
 

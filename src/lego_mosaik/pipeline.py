@@ -7,12 +7,13 @@ Dithering-Verfahren oder eine PostgreSQL-Quelle dazukommt.
 """
 
 import logging
+import math
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 lazy import numpy as np
@@ -27,6 +28,7 @@ from lego_mosaik.config import (
     relief_color_id,
     substrate_color_id,
 )
+from lego_mosaik.domain.cleanup import rare_colors, remove_isolated
 from lego_mosaik.domain.errors import ConfigError
 from lego_mosaik.domain.layout import (
     BOND_PART_STUDS,
@@ -100,6 +102,7 @@ class PipelineComponents:
         tiler: Zerlegt das Bild.
         frame_tiler: Zerlegt den Rahmen (eigene Teilarten, z. B. nur Tiles).
         support_tiler: Zerlegt die Plates unter einem erhöhten Rahmen und unter dem Relief.
+        brick_tiler: Zerlegt die Bricks im Relief (ein Brick ersetzt drei Lagen Plates).
         bond_tiler: Zerlegt die Verbindungslage über großen Platten (lange Plates erlaubt).
         shaper: Wählt Formteile (Stil des Bilds).
     """
@@ -110,6 +113,7 @@ class PipelineComponents:
     tiler: TilingStrategy
     frame_tiler: TilingStrategy
     support_tiler: TilingStrategy
+    brick_tiler: TilingStrategy
     bond_tiler: TilingStrategy
     shaper: ShapeRefiner
     writers: tuple[OutputWriter, ...]
@@ -286,7 +290,7 @@ class MosaicPipeline:
             )
             detail = _detail_image(components, image, size, materials, run_config.frame.width)
         with timer.step("Dithering"):
-            grid, palette = _dither(components, rgb, palette, run_config.palette.max_colors)
+            grid, palette = _dither(components, rgb, palette, run_config)
             grid, palette = apply_frame(
                 grid,
                 palette,
@@ -321,8 +325,6 @@ class MosaicPipeline:
             bond = _bond_layer(components.bond_tiler, materials, size, catalog, run_config)
             if bond:  # alles über der Verbindungslage liegt eine Plate höher
                 layers = layers.raised(PLATE_HEIGHT_LDU)
-        stats = _stats(size, layers, substrate, connectors, timer.durations)
-        stats["verbindungsteile"] = len(bond)
         mosaic = Mosaic(
             title=title,
             width=size.width,
@@ -333,11 +335,15 @@ class MosaicPipeline:
             frame=layers.frame,
             supports=layers.supports,
             relief=layers.relief,
+            underlays=layers.underlays,
             substrate=substrate,
             connectors=connectors,
             bond=bond,
             element_ids=catalog.element_ids,
-            metadata={"konfiguration": config_to_dict(run_config), "statistik": stats},
+        )
+        stats = _stats(size, mosaic, timer.durations, run_config)
+        mosaic = replace(
+            mosaic, metadata={"konfiguration": config_to_dict(run_config), "statistik": stats}
         )
         return _Build(run_config, components, mosaic, stats)
 
@@ -454,12 +460,13 @@ def _layout_size(config: AppConfig, preparer: ImagePreparer, image: Path | bytes
 
 @dataclass(frozen=True, slots=True)
 class _Layers:
-    """Zerlegte Lagen: Bild (pro Abschnitt), Rahmen, Stützteile darunter und Relief."""
+    """Zerlegte Lagen: Bild (pro Abschnitt), Rahmen, Stützteile, Relief und Unterlagen."""
 
     image: tuple[Placement, ...]
     frame: tuple[Placement, ...]
     supports: tuple[Placement, ...]
     relief: tuple[Placement, ...] = ()
+    underlays: tuple[Placement, ...] = ()
 
     def raised(self, ldu: int) -> _Layers:
         """Alle Lagen um ``ldu`` angehoben (z. B. über eine Verbindungslage)."""
@@ -467,7 +474,13 @@ class _Layers:
         def lift(placements: tuple[Placement, ...]) -> tuple[Placement, ...]:
             return tuple(replace(p, bottom_ldu=p.bottom_ldu + ldu) for p in placements)
 
-        return _Layers(lift(self.image), lift(self.frame), lift(self.supports), lift(self.relief))
+        return _Layers(
+            lift(self.image),
+            lift(self.frame),
+            lift(self.supports),
+            lift(self.relief),
+            lift(self.underlays),
+        )
 
 
 def _tile_layers(
@@ -484,7 +497,7 @@ def _tile_layers(
     Der Rahmen wird am Stück zerlegt (seine Teile dürfen Abschnittsgrenzen und
     Plattennähte überbrücken), das Bild pro Abschnitt und pro Relief-Stufe: Ein Teil
     darf nie über eine Stufe reichen. Formteile stehen schon fest und bleiben frei;
-    ihre Unterlagen kommen zu den Relief-Lagen (sie werden vorher gebaut).
+    ihre Unterlagen sind eine eigene Lage (sie werden vor dem Bild gebaut).
     """
     height, width = grid.shape
     ring = frame_mask(height, width, config.frame.width)
@@ -500,10 +513,10 @@ def _tile_layers(
         level_grid = np.where(free & (levels == level), grid, EMPTY_CELL).astype(np.intp)
         tiled = _tile_sections(components.tiler, level_grid, palette, catalog, size)
         image += [replace(p, bottom_ldu=level * PLATE_HEIGHT_LDU) for p in tiled]
-    relief = _relief_supports(components.support_tiler, levels, ~ring, catalog, config, size)
-    relief += tuple(_lift(shaped.underlays, levels))
+    relief = _relief_supports(components, levels, ~ring, catalog, config, size)
+    underlays = tuple(_lift(shaped.underlays, levels))
     if not ring.any():
-        return _Layers(tuple(image), (), (), relief)
+        return _Layers(tuple(image), (), (), relief, underlays)
     raise_ldu = config.frame.raise_plates * PLATE_HEIGHT_LDU
     frame_grid = np.where(ring, grid, EMPTY_CELL).astype(np.intp)
     frame = tuple(
@@ -511,7 +524,7 @@ def _tile_layers(
         for placement in components.frame_tiler.tile(frame_grid, palette, catalog)
     )
     supports = _supports(components.support_tiler, ring, palette, catalog, config)
-    return _Layers(tuple(image), frame, supports, relief)
+    return _Layers(tuple(image), frame, supports, relief, underlays)
 
 
 def _lift(placements: Iterable[Placement], levels: IndexGrid) -> Iterator[Placement]:
@@ -522,29 +535,60 @@ def _lift(placements: Iterable[Placement], levels: IndexGrid) -> Iterator[Placem
 
 
 def _relief_supports(
-    tiler: TilingStrategy,
+    components: PipelineComponents,
     levels: IndexGrid,
     image_area: npt.NDArray[np.bool_],
     catalog: PartCatalog,
     config: AppConfig,
     section_studs: int,
 ) -> tuple[Placement, ...]:
-    """Plates unter erhöhten Bildteilen: Lage k liegt überall dort, wo die Höhe größer als k ist.
+    """Stützen unter erhöhten Bildteilen: Unter einer Zelle der Höhe h stehen h Plates.
 
-    Zerlegt wird pro Abschnitt, damit jede Lage zu genau einem Bauabschnitt gehört.
+    Wo mindestens drei Plates übereinander kämen, steht stattdessen ein Brick (so hoch wie
+    drei Plates): Das spart zwei Drittel der Teile und Bauschritte. Was übrig bleibt,
+    wird mit Plates aufgefüllt. Zerlegt wird pro Abschnitt, damit jede Lage zu genau
+    einem Bauabschnitt gehört.
     """
     top = int(levels.max(initial=0))
     if top == 0:
         return ()
     color = catalog.colors[relief_color_id(config)]
+    brick_plates = _brick_plates(catalog, color)
     placements: list[Placement] = []
-    for level in range(top):
-        layer = np.where(image_area & (levels > level), 0, EMPTY_CELL).astype(np.intp)
-        placements += [
+
+    def add(tiler: TilingStrategy, mask: npt.NDArray[np.bool_], level: int) -> None:
+        layer = np.where(mask, 0, EMPTY_CELL).astype(np.intp)
+        placements.extend(
             replace(p, bottom_ldu=level * PLATE_HEIGHT_LDU)
             for p in _tile_sections(tiler, layer, (color,), catalog, section_studs)
-        ]
+        )
+
+    level = 0
+    while level < top:
+        bricks = image_area & (levels >= level + brick_plates) if brick_plates else None
+        if bricks is not None and bricks.any():
+            add(components.brick_tiler, bricks, level)
+        # Plates dort, wo kein Brick steht; ohne Bricks eine Plate pro Lage
+        step = brick_plates or 1
+        for plate_level in range(level, min(level + step, top)):
+            mask = image_area & (levels > plate_level)
+            if bricks is not None:
+                mask &= ~bricks
+            if mask.any():
+                add(components.support_tiler, mask, plate_level)
+        level += step
     return tuple(placements)
+
+
+def _brick_plates(catalog: PartCatalog, color: LegoColor) -> int:
+    """Höhe eines Bricks in Plates, wenn es Bricks samt 1 × 1 in der Farbe gibt; sonst 0.
+
+    Der 1 × 1 Brick ist nötig, damit sich jede Fläche lückenlos füllen lässt.
+    """
+    bricks = catalog.parts_in_color(color.id, (PartKind.BRICK,))
+    if not any(part.is_single_stud for part in bricks):
+        return 0
+    return bricks[0].height_ldu // PLATE_HEIGHT_LDU
 
 
 def _detail_image(
@@ -762,26 +806,50 @@ def _palette(
     return palette
 
 
+MAX_RARE_COLOR_PASSES = 4  # so oft wird höchstens ohne seltene Farben neu gedithert
+
+
 def _dither(
     components: PipelineComponents,
     rgb: RgbImage,
     palette: tuple[LegoColor, ...],
-    max_colors: int | None,
+    config: AppConfig,
 ) -> tuple[IndexGrid, tuple[LegoColor, ...]]:
-    """Dithert das Bild; mit ``max_colors`` ein zweites Mal mit den häufigsten Farben."""
+    """Dithert das Bild und räumt auf.
+
+    1. Mit ``max_colors``: ein zweites Mal mit den häufigsten Farben.
+    2. Mit ``min_color_share``: Farben auf zu wenigen Zellen fallen weg, das Bild wird ohne
+       sie neu gedithert (mehrmals, weil dabei neue seltene Farben entstehen können).
+    3. Mit ``despeckle``: einzelne Pixel bekommen die Farbe ihrer Nachbarn.
+    """
     image_lab = components.color_space.to_lab(rgb.astype(np.float64))
 
-    def dither_with(colors: tuple[LegoColor, ...]) -> IndexGrid:
-        palette_lab = components.color_space.to_lab(
+    def lab_of(colors: tuple[LegoColor, ...]) -> FloatImage:
+        result: FloatImage = components.color_space.to_lab(
             np.array([c.rgb for c in colors], dtype=np.float64)
         )
-        return components.ditherer.dither(image_lab, palette_lab)
+        return result
+
+    def dither_with(colors: tuple[LegoColor, ...]) -> IndexGrid:
+        return components.ditherer.dither(image_lab, lab_of(colors))
 
     grid = dither_with(palette)
+    max_colors = config.palette.max_colors
     if max_colors is not None and len(palette) > max_colors:
         palette = most_used_colors(grid, palette, max_colors)
         logger.info("Palette auf die %d häufigsten Farben begrenzt.", len(palette))
         grid = dither_with(palette)
+    min_cells = math.ceil(config.palette.min_color_share * grid.size)
+    for _ in range(MAX_RARE_COLOR_PASSES if min_cells > 1 else 0):
+        rare = set(rare_colors(grid, len(palette), min_cells))
+        kept = tuple(color for index, color in enumerate(palette) if index not in rare)
+        if not rare or not kept:
+            break
+        logger.info("%d seltene Farben zusammengelegt.", len(palette) - len(kept))
+        palette = kept
+        grid = dither_with(palette)
+    if config.dithering.despeckle:
+        grid = remove_isolated(grid, lab_of(palette))
     return grid, palette
 
 
@@ -813,30 +881,48 @@ def _tile_sections(
 
 
 def _stats(
-    size: LayoutSize,
-    layers: _Layers,
-    substrate: Sequence[Placement],
-    connectors: Sequence[Placement],
-    durations: Mapping[str, float],
+    size: LayoutSize, mosaic: Mosaic, durations: Mapping[str, float], config: AppConfig
 ) -> dict[str, object]:
-    """Kennzahlen des Laufs als JSON-fähiges dict."""
-    surface = layers.frame + layers.image
-    tiling = TilingStats.from_placements(size.width, size.height, surface)
-    shaped = sum(1 for placement in layers.image if placement.part.is_shaped)
+    """Kennzahlen des Laufs als JSON-fähiges dict (zum Vergleichen von Läufen).
+
+    Alle Zählungen kommen aus dem fertigen Mosaik, damit Titelblatt, Teileliste und
+    ``ergebnis.json`` dieselben Zahlen zeigen.
+    """
+    tiling = TilingStats.from_placements(size.width, size.height, mosaic.surface)
+    all_parts = mosaic.all_parts
+    single = sum(1 for p in all_parts if p.part.area == 1 and not p.part.is_shaped)
     return {
         "breite": size.width,
         "hoehe": size.height,
         "bild_breite": size.image_width,
         "bild_hoehe": size.image_height,
-        "farben": len({placement.color.id for placement in surface}),
+        "teile": len(all_parts),
+        "farben": len(mosaic.part_colors()),
+        "altfarben": len(_retired_colors(mosaic, config)),
+        "anteil_1x1": round(single / len(all_parts), 3) if all_parts else 0.0,
         **asdict(tiling),  # pixels, parts, savings_percent
-        "stuetzteile": len(layers.supports),
-        "formteile": shaped,
-        "relief_teile": len(layers.relief),
-        "unterbau_platten": len(substrate),
-        "verbinder": len(connectors),
+        "stuetzteile": len(mosaic.supports),
+        "formteile": sum(1 for placement in mosaic.placements if placement.part.is_shaped),
+        "relief_teile": len(mosaic.relief),
+        "unterlagen": len(mosaic.underlays),
+        "unterbau_platten": len(mosaic.substrate),
+        "verbinder": len(mosaic.connectors),
+        "verbindungsteile": len(mosaic.bond),
         "dauer_sekunden": dict(durations),
     }
+
+
+def _retired_colors(mosaic: Mosaic, config: AppConfig) -> list[LegoColor]:
+    """Farben, die zuletzt vor dem Zeitraum ``recent_years`` in einem Set vorkamen."""
+    years = config.source.recent_years
+    if years is None:
+        return []
+    min_year = date.today().year - years + 1
+    return [
+        color
+        for color in mosaic.part_colors()
+        if color.last_year is not None and color.last_year < min_year
+    ]
 
 
 def _write_outputs(

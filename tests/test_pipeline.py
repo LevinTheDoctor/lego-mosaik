@@ -222,10 +222,16 @@ def test_shape_underlays_sit_below_their_parts(
     pipeline_config: AppConfig, circle_file: Path
 ) -> None:
     mosaic = make_pipeline(pipeline_config).preview(circle_file, MosaicOverrides(style="formen"))
-    under = {cell: p for p in mosaic.relief for cell in p.cells()}
+    assert mosaic.underlays
+    under = {cell: p for p in mosaic.underlays for cell in p.cells()}
     for part in (p for p in mosaic.placements if p.part.is_shaped and p.bottom_ldu):
         for cell in part.cells():
             assert under[cell].top_ldu == part.bottom_ldu
+    steps = assembly_steps(mosaic, section_studs=16, rows_per_step=4)
+    kinds = [step.kind for step in steps if step.section is not None]
+    # die Unterlagen sind ein eigener Schritt vor dem Bild, nicht Teil des Reliefs
+    assert kinds.index(StepKind.UNDERLAY) < kinds.index(StepKind.SECTION)
+    assert StepKind.RELIEF not in kinds
 
 
 def test_relief_lifts_the_subject(pipeline_config: AppConfig, circle_file: Path) -> None:
@@ -241,6 +247,77 @@ def test_relief_lifts_the_subject(pipeline_config: AppConfig, circle_file: Path)
     image_steps = [step.kind for step in steps if step.section is not None]
     assert image_steps[:2] == [StepKind.RELIEF, StepKind.RELIEF]  # erst die Lagen, dann das Bild
     assert StepKind.SECTION in image_steps
+
+
+def test_relief_of_three_plates_uses_bricks(pipeline_config: AppConfig, circle_file: Path) -> None:
+    overrides = MosaicOverrides(relief=ReliefMode.SUBJECT, relief_levels=3)
+    mosaic = make_pipeline(pipeline_config).preview(circle_file, overrides)
+    assert mosaic.relief
+    # Motiv-Relief: alle erhöhten Zellen sind 3 Plates hoch → nur Bricks, eine Lage
+    assert {p.part.kind for p in mosaic.relief} == {PartKind.BRICK}
+    assert {p.bottom_ldu for p in mosaic.relief} == {0}
+    assert {p.bottom_ldu for p in mosaic.placements} == {0, 24}
+
+
+def _occupancy(mosaic: Mosaic) -> dict[tuple[int, int, int], object]:
+    """(Zeile, Spalte, Plate-Lage) → Teil; schlägt fehl, wenn zwei Teile dieselbe Stelle belegen."""
+    taken: dict[tuple[int, int, int], object] = {}
+    for placement in mosaic.stacked:
+        levels = range(placement.bottom_ldu // 8, placement.top_ldu // 8)
+        for (row, col), level in ((cell, level) for cell in placement.cells() for level in levels):
+            key = (row, col, level)
+            assert key not in taken, f"{placement} überschneidet {taken[key]} bei {key}"
+            taken[key] = placement
+    return taken
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        MosaicOverrides(style="formen"),
+        MosaicOverrides(style="formen", relief=ReliefMode.SUBJECT, relief_levels=3),
+        MosaicOverrides(style="formen", relief=ReliefMode.BRIGHT, relief_levels=2),
+        MosaicOverrides(style="punkte", frame_raise_plates=1),
+        MosaicOverrides(substrate=Substrate.PLATES, plates_wide=2, frame_raise_plates=2),
+    ],
+)
+def test_every_part_has_its_own_place_and_stands_on_something(
+    pipeline_config: AppConfig, circle_file: Path, overrides: MosaicOverrides
+) -> None:
+    mosaic = make_pipeline(pipeline_config).preview(circle_file, overrides)
+    taken = _occupancy(mosaic)
+    for placement in mosaic.stacked:
+        level = placement.bottom_ldu // 8
+        if level == 0:
+            continue  # steht auf dem Unterbau
+        for row, col in placement.cells():
+            assert (row, col, level - 1) in taken, f"{placement} schwebt bei {(row, col)}"
+
+
+def test_rare_colors_are_merged(pipeline_config: AppConfig, tmp_path: Path) -> None:
+    # Weißes Bild mit drei einzelnen roten Pixeln
+    pixels = np.full((14, 14, 3), 255, dtype=np.uint8)
+    for row, col in ((2, 3), (7, 9), (11, 4)):
+        pixels[row, col] = (201, 26, 9)
+    path = tmp_path / "punkte.png"
+    Image.fromarray(pixels).save(path)
+    config = dataclasses.replace(
+        pipeline_config, palette=dataclasses.replace(pipeline_config.palette, min_color_share=0.02)
+    )
+    mosaic = make_pipeline(config).preview(path, MosaicOverrides(style="quadrat", frame_width=1))
+    assert "Red" not in {color.name for color in mosaic.used_colors()}
+    kept = make_pipeline(pipeline_config).preview(path, MosaicOverrides(style="quadrat"))
+    assert "Red" in {color.name for color in kept.used_colors()}
+
+
+def test_color_count_matches_parts_list(pipeline_config: AppConfig, circle_file: Path) -> None:
+    result = make_pipeline(pipeline_config).run(circle_file, MosaicOverrides(style="formen"))
+    stats = result.stats
+    rows = (result.target_dir / "teileliste.csv").read_text(encoding="utf-8-sig").splitlines()
+    colors_in_list = {row.split(";")[2] for row in rows[1:]}
+    assert stats["farben"] == len(colors_in_list) == len(result.mosaic.part_colors())
+    assert stats["teile"] == len(result.mosaic.all_parts)
+    assert stats["altfarben"] == 0
 
 
 def test_shaped_parts_in_ldraw_and_parts_list(

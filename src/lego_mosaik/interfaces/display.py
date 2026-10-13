@@ -26,8 +26,10 @@ def print_summary(console: Console, result: MosaicResult) -> None:
     if stats["stuetzteile"]:  # nur bei erhöhtem Rahmen
         parts += f", {stats['stuetzteile']} unter dem Rahmen"
     if stats.get("relief_teile"):
-        parts += f", {stats['relief_teile']} darunter als Relief und Unterlage"
-    table.add_row("Teile", parts)
+        parts += f", {stats['relief_teile']} als Relief darunter"
+    if stats.get("unterlagen"):
+        parts += f", {stats['unterlagen']} Unterlagen unter Formteilen"
+    table.add_row("Teile", f"{stats['teile']} insgesamt: {parts}")
     table.add_row("Einsparung", f"{stats['savings_percent']} % gegenüber nur 1×1")
     durations = stats["dauer_sekunden"]
     assert isinstance(durations, dict)  # schränkt den Typ für mypy ein

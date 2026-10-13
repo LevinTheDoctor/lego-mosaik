@@ -8,8 +8,9 @@ import csv
 import gzip
 import logging
 import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import TextIO
 
@@ -38,11 +39,19 @@ logger = logging.getLogger(__name__)
 COLORS_FILE = "colors.csv.gz"
 PARTS_FILE = "parts.csv.gz"
 ELEMENTS_FILE = "elements.csv.gz"
+# Set-Inventare: welche Teile in welchen Farben in welchen Sets stecken (für „aktuell“)
+SETS_FILE = "sets.csv.gz"
+INVENTORIES_FILE = "inventories.csv.gz"
+INVENTORY_PARTS_FILE = "inventory_parts.csv.gz"
+INVENTORY_FILES = (SETS_FILE, INVENTORIES_FILE, INVENTORY_PARTS_FILE)
 
 # Benötigte Spalten pro Datei; weitere Spalten werden toleriert
 COLOR_COLUMNS = ("id", "name", "rgb", "is_trans")
 PART_COLUMNS = ("part_num", "name")
 ELEMENT_COLUMNS = ("element_id", "part_num", "color_id")
+SET_COLUMNS = ("set_num", "year")
+INVENTORY_COLUMNS = ("id", "set_num")
+INVENTORY_PART_COLUMNS = ("inventory_id", "part_num", "color_id")
 GEOMETRY_COLUMNS = ("part_num", "kind", "width_studs", "length_studs", "ldraw_file", "height_ldu")
 COLOR_MAPPING_COLUMNS = ("rebrickable_id", "ldraw_code")
 
@@ -80,6 +89,10 @@ class RebrickableCsvSource:
         color_mapping_file: Pfad zu ``farb_zuordnung.csv`` (optional, darf fehlen).
         studio_color_file: Pfad zu Studios ``StudioColorDefinition.txt`` (optional).
         category_keywords: Fallback-Regeln für Farbkategorien ohne Studio-Tabelle.
+        recent_years: Nur (Teil, Farbe)-Kombinationen aus Sets der letzten so vielen Jahre
+            (``None`` = auch historische). ``elements.csv`` enthält auch Elemente, die es seit
+            Jahren nicht mehr gibt (z. B. das alte Grau von vor 2004).
+        today: Uhr für das aktuelle Jahr (in Tests austauschbar).
     """
 
     def __init__(
@@ -90,12 +103,16 @@ class RebrickableCsvSource:
         color_mapping_file: Path,
         studio_color_file: Path | None,
         category_keywords: Sequence[tuple[str, ColorCategory]],
+        recent_years: int | None = None,
+        today: Callable[[], date] = date.today,
     ) -> None:
         self._data_dir = data_dir
         self._geometry_file = geometry_file
         self._color_mapping_file = color_mapping_file
         self._studio_color_file = studio_color_file
         self._category_keywords = tuple(category_keywords)
+        self._recent_years = recent_years
+        self._today = today
         self._catalog: PartCatalog | None = None
         # Lock: Im FastAPI-Threadpool könnten zwei Anfragen gleichzeitig zum ersten
         # Mal laden. "with self._lock" lässt immer nur einen Thread hinein.
@@ -140,6 +157,11 @@ class RebrickableCsvSource:
         available, element_ids = read_elements(
             data_dir / ELEMENTS_FILE, part_types.keys(), colors.keys()
         )
+        if self._recent_years is not None:
+            min_year = self._today().year - self._recent_years + 1
+            current = self._current_combos(part_types.keys(), colors, min_year)
+            available = frozenset(combo for combo in available if combo in current)
+            element_ids = {combo: eid for combo, eid in element_ids.items() if combo in available}
         logger.info(
             "Teilekatalog geladen: %d Farben, %d Teiltypen, %d verfügbare Kombinationen.",
             len(colors),
@@ -147,6 +169,44 @@ class RebrickableCsvSource:
             len(available),
         )
         return PartCatalog(colors, part_types, available, element_ids)
+
+    def _current_combos(
+        self, part_nums: Collection[str], colors: Mapping[int, LegoColor], min_year: int
+    ) -> _CurrentCombos:
+        """Welche Kombinationen als aktuell gelten (aus Set-Inventaren, sonst aus Farbjahren)."""
+        missing = [name for name in INVENTORY_FILES if not (self._data_dir / name).exists()]
+        if missing:
+            logger.warning(
+                "Set-Inventare fehlen (%s): Altfarben werden nur über das letzte Jahr der "
+                "Farbe erkannt.",
+                ", ".join(missing),
+            )
+            return _CurrentCombos(colors, min_year)
+        recent = read_recent_combos(self._data_dir, part_nums, min_year)
+        return _CurrentCombos(colors, min_year, recent, frozenset(part for part, _ in recent))
+
+
+@dataclass(frozen=True, slots=True)
+class _CurrentCombos:
+    """Entscheidet, ob es eine (Teil, Farbe)-Kombination heute noch gibt.
+
+    - Mit Set-Inventaren: Die Kombination steckt in einem Set ab ``min_year``. Teile, die
+      in keinem dieser Sets vorkommen (Rebrickable führt sie dort unter anderer Nummer,
+      z. B. Paneele und Pins), behalten alle Farben, die nicht ausgelaufen sind.
+    - Immer: Die Farbe wurde zuletzt vor ``min_year`` verwendet → ausgelaufen.
+    """
+
+    colors: Mapping[int, LegoColor]
+    min_year: int
+    recent: frozenset[tuple[str, int]] = frozenset()
+    recent_parts: frozenset[str] = frozenset()  # Teile, die überhaupt in diesen Sets stecken
+
+    def __contains__(self, combo: tuple[str, int]) -> bool:
+        part_num, color_id = combo
+        last_year = self.colors[color_id].last_year
+        if last_year is not None and last_year < self.min_year:
+            return False
+        return part_num not in self.recent_parts or combo in self.recent
 
 
 def _to_part_type(part_num: str, name: str, row: _Geometry) -> PartType:
@@ -283,6 +343,8 @@ def read_colors(path: Path, enrichment: ColorEnrichment) -> dict[int, LegoColor]
             rgb=parse_hex_rgb(row["rgb"]),
             is_transparent=row["is_trans"].strip().lower() in TRUE_VALUES,
             ldraw_code=None,
+            # optionale Spalte y2: letztes Jahr, in dem die Farbe in einem Set vorkam
+            last_year=int(row["y2"]) if (row.get("y2") or "").strip().isdigit() else None,
         )
         return enrichment.apply(color)
 
@@ -330,6 +392,42 @@ def read_elements(
                 if current is None or _element_sort_key(element_id) < _element_sort_key(current):
                     element_ids[combo] = element_id
     return frozenset(element_ids), element_ids
+
+
+def read_recent_combos(
+    data_dir: Path, part_nums: Iterable[str], min_year: int
+) -> frozenset[tuple[str, int]]:
+    """(Teil, Farbe)-Kombinationen, die in Sets ab ``min_year`` vorkommen.
+
+    Verknüpft ``sets.csv`` (Jahr) → ``inventories.csv`` (Inventar pro Set) →
+    ``inventory_parts.csv`` (Teile pro Inventar). Die letzte Datei hat über eine Million
+    Zeilen; deshalb liest ``_columns`` per Spaltenindex statt mit ``DictReader``.
+    """
+    wanted = frozenset(part_nums)
+    sets = {
+        row[0]
+        for row in _columns(data_dir / SETS_FILE, SET_COLUMNS)
+        if row[1].isdigit() and int(row[1]) >= min_year
+    }
+    inventories = {
+        row[0] for row in _columns(data_dir / INVENTORIES_FILE, INVENTORY_COLUMNS) if row[1] in sets
+    }
+    return frozenset(
+        (row[1], int(row[2]))
+        for row in _columns(data_dir / INVENTORY_PARTS_FILE, INVENTORY_PART_COLUMNS)
+        if row[0] in inventories and row[1] in wanted
+    )
+
+
+def _columns(path: Path, required: tuple[str, ...]) -> Iterator[list[str]]:
+    """Liest nur die Spalten ``required`` (in dieser Reihenfolge) aus einer gzip-CSV."""
+    with _open_text(path, compressed=True) as handle:
+        reader = csv.reader(handle)
+        header = next(reader, [])
+        _require_columns(header, required, path)
+        indices = [header.index(column) for column in required]
+        for row in reader:
+            yield [row[index] for index in indices]
 
 
 def _element_sort_key(element_id: str) -> tuple[int, str]:

@@ -48,7 +48,8 @@ def test_bricklink_xml(mosaic: Mosaic, tmp_path: Path) -> None:
     root = ElementTree.parse(tmp_path / "teileliste_bricklink.xml").getroot()
     items = [{child.tag: child.text for child in item} for item in root.iter("ITEM")]
     assert root.tag == "INVENTORY"
-    assert items[0] == {"ITEMTYPE": "P", "ITEMID": "3070", "COLOR": "11", "MINQTY": "2"}
+    assert {"ITEMTYPE": "P", "ITEMID": "3070", "COLOR": "11", "MINQTY": "2"} in items
+    assert items[0]["COLOR"] == "1"  # nach Farbfamilien: Weiß vor Schwarz
     assert sum(int(item["MINQTY"] or 0) for item in items) == len(mosaic.placements)
 
 
@@ -70,7 +71,7 @@ def test_lego_list_uses_official_names(mosaic: Mosaic, tmp_path: Path) -> None:
     path = OfficialPartsListsWriter().write(mosaic, tmp_path)
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter=";"))
-    assert rows[0]["Design-ID"] == "3070"
-    assert rows[0]["LEGO-Farbe"] == "Black"
-    assert rows[0]["Element-ID"] != ""
+    black_tiles = [row for row in rows if row["LEGO-Farbe"] == "Black"]
+    assert [row["Design-ID"] for row in black_tiles] == ["3070"]
+    assert black_tiles[0]["Element-ID"] != ""
     assert sum(int(row["Anzahl"]) for row in rows) == len(mosaic.placements)

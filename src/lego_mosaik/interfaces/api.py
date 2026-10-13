@@ -270,6 +270,10 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
         dithering: Annotated[str | None, Form(description="Dithering-Verfahren")] = None,
         staerke: Annotated[float | None, Form(description="0.0 bis 1.0")] = None,
         farbabstand: Annotated[str | None, Form(description="cie76 oder ciede2000")] = None,
+        aufraeumen: Annotated[
+            bool | None,
+            Form(description="Einzelne Pixel durch die Nachbarfarbe ersetzen (Comics, Logos)"),
+        ] = None,
         zerlegung: Annotated[str | None, Form(description="Zerlegungsverfahren")] = None,
         ausgaben: Annotated[str | None, Form(description="z. B. preview_png,ldraw")] = None,
         titel: Annotated[
@@ -303,6 +307,7 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
             dithering_method=dithering,
             strength=staerke,
             color_distance=farbabstand,
+            despeckle=aufraeumen,
             tiling_strategy=zerlegung,
             outputs=ausgaben,
             title=titel,

@@ -17,7 +17,14 @@ from lego_mosaik.domain.layout import (
     grid_layout_size,
     substrate_placements,
 )
-from lego_mosaik.domain.models import LongAxis, Mosaic, PartCatalog, PartKind, Placement
+from lego_mosaik.domain.models import (
+    LongAxis,
+    Mosaic,
+    PartCatalog,
+    PartKind,
+    Placement,
+    color_family_key,
+)
 from lego_mosaik.domain.palette import build_palette
 from lego_mosaik.outputs.ldraw import ldraw_lines, part_y, placement_line
 from lego_mosaik.registry import OUTPUT_WRITERS
@@ -189,7 +196,9 @@ def test_parts_lists(mosaic: Mosaic, app_config: AppConfig, tmp_path: Path) -> N
         rows = list(csv.DictReader(handle, delimiter=";"))
     assert sum(int(row["Anzahl"]) for row in rows) == len(mosaic.placements)
     assert all(row["Element-ID"] for row in rows)
-    assert [int(row["Farb-ID"]) for row in rows] == sorted(int(row["Farb-ID"]) for row in rows)
+    by_id = {color.id: color for color in mosaic.palette}
+    families = [color_family_key(by_id[int(row["Farb-ID"])]) for row in rows]
+    assert families == sorted(families)  # ähnliche Farben stehen nebeneinander
     rebrickable = (tmp_path / "teileliste_rebrickable.csv").read_text(encoding="utf-8-sig")
     assert rebrickable.splitlines()[0] == "Part,Color,Quantity"
 
@@ -199,7 +208,7 @@ def test_result_json(mosaic: Mosaic, app_config: AppConfig, tmp_path: Path) -> N
     path = OUTPUT_WRITERS["result_json"](app_config).write(mosaic, tmp_path)
     result = json.loads(path.read_text(encoding="utf-8"))
     assert result["dateien"] == ["ergebnis.json", "mosaik.ldr"]
-    assert result["statistik"] == {"teile": len(mosaic.placements)}
+    assert result["statistik"] == {"teile": len(mosaic.placements), "seiten": 0}  # ohne Anleitung
     assert result["anzahl_teile"] == len(mosaic.placements)
     assert sum(color["noppen"] for color in result["palette"]) == 64
     assert [color["name"] for color in result["palette"]] == ["Black", "Red", "White"]
