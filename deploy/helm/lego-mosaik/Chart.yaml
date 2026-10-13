@@ -1,0 +1,19 @@
+apiVersion: v2
+name: lego-mosaik
+description: LEGO-Mosaik-Service (Cloud-Variante) mit PostgreSQL und Garage (S3)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/LevinTheDoctor/lego-mosaik
+sources:
+  - https://github.com/LevinTheDoctor/lego-mosaik
+maintainers:
+  - name: Levin Rüßmann
+keywords: [lego, mosaik, fastapi, garage, s3, postgresql]
+dependencies:
+  - name: postgresql
+    version: 0.1.0
+    condition: postgresql.enabled
+  - name: garage
+    version: 0.1.0
+    condition: garage.enabled

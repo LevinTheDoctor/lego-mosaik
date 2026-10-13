@@ -1,0 +1,160 @@
+# Werte für lego-mosaik (Cloud-Variante). Siehe docs/cloud.md.
+
+image:
+  repository: ghcr.io/levinthedoctor/lego-mosaik
+  tag: "" # leer = appVersion aus Chart.yaml
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 2
+
+config:
+  logLevel: INFO
+  logFormat: json # json oder text
+  maxUploadMb: 20
+  # Frontends, die die API im Browser aufrufen dürfen (kommagetrennt bzw. Regex)
+  corsOrigins: ""
+  corsOriginRegex: ""
+  catalogRefreshSeconds: 60
+  # OpenTelemetry: Tracing an, sobald ein Endpunkt gesetzt ist (z. B. http://otel-collector:4318)
+  otlpEndpoint: ""
+  # Zusätzlich gesetzte Umgebungsvariablen, z. B. BRICKLINK_* aus einem Secret
+  extraEnv: []
+  extraEnvFrom: []
+
+# Optional: Bricklink-Studio-Farbtabelle (StudioColorDefinition.txt) aus einer ConfigMap.
+# Ohne sie fehlen BrickLink-Farbcodes; LDraw-Codes kommen dann aus den Rebrickable-IDs.
+studioColors:
+  configMap: ""
+  key: StudioColorDefinition.txt
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false # Die API hat keine Anmeldung: nur hinter Auth (z. B. oauth2-proxy) öffnen
+  className: ""
+  annotations:
+    # Mosaike entstehen synchron und dauern bis zu Minuten; Bilder bis maxUploadMb
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-body-size: "25m"
+  hosts:
+    - host: lego-mosaik.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+# Mosaike werden in /tmp gerechnet, bevor sie nach S3 gehen
+tmpVolume:
+  sizeLimit: 2Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+probes:
+  startup:
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    periodSeconds: 15
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+
+metrics:
+  # prometheus.io/*-Annotationen für Prometheus ohne Operator
+  podAnnotations: true
+  serviceMonitor:
+    enabled: false # braucht den Prometheus Operator
+    interval: 30s
+    labels: {}
+
+catalogImport:
+  # Erster Import bei Install/Upgrade (überspringt, wenn der Katalog noch aktuell ist)
+  onRelease: true
+  schedule: "17 3 * * *" # täglich 03:17
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+# --- S3 ----------------------------------------------------------------------------------
+s3:
+  bucket: lego-mosaik
+  prefix: mosaike
+  region: garage
+  # Leer + garage.enabled = interner Garage-Service
+  endpoint: ""
+  # Vorhandenes Secret mit accessKeyId und secretAccessKey; leer = erzeugt
+  # (Garage verlangt: ID "GK" + 24 Hex-Zeichen, Secret 64 Hex-Zeichen)
+  existingSecret: ""
+
+garageInit:
+  # Richtet Layout, S3-Key und Bucket in der mitgelieferten Garage ein
+  zone: dc1
+  capacityBytes: 20000000000
+
+# --- Datenbank ----------------------------------------------------------------------------
+# Externe Datenbank, wenn postgresql.enabled=false
+externalDatabase:
+  # SQLAlchemy-URL, z. B. postgresql+psycopg://user:pw@host:5432/db
+  url: ""
+  existingSecret: ""
+  existingSecretKey: url
+
+# --- Subcharts ----------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  auth:
+    username: lego
+    database: lego_mosaik
+
+garage:
+  enabled: true
+  replicaCount: 1
+  replicationFactor: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

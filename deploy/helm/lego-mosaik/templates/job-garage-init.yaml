@@ -1,0 +1,39 @@
+{{- if .Values.garage.enabled }}
+# Kein Helm-Hook: Mit "helm install --wait" würden post-install-Hooks erst nach der
+# Readiness laufen – die braucht aber den Bucket. Der Name enthält die Revision, weil
+# Jobs unveränderlich sind; ttlSecondsAfterFinished räumt alte Läufe auf.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "lego-mosaik.fullname" . }}-garage-init-{{ .Release.Revision }}
+  labels:
+    {{- include "lego-mosaik.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage-init
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "lego-mosaik.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: garage-init
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "lego-mosaik.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        {{- $env := list
+          (dict "name" "GARAGE_ADMIN_URL" "value" (printf "http://%s:3903" (include "lego-mosaik.garage.fullname" .)))
+          (dict "name" "GARAGE_ADMIN_TOKEN" "valueFrom" (dict "secretKeyRef" (dict "name" (.Values.garage.auth.existingSecret | default (include "lego-mosaik.garage.fullname" .)) "key" "adminToken")))
+        }}
+        {{- $args := list "garage-init" "--knoten" (toString .Values.garage.replicaCount) "--zone" .Values.garageInit.zone "--kapazitaet" (toString (int64 .Values.garageInit.capacityBytes)) "--warten" "600" }}
+        {{- include "lego-mosaik.commandContainer" (dict "root" . "name" "garage-init" "args" $args "extraEnv" $env) | nindent 8 }}
+      volumes:
+        {{- include "lego-mosaik.volumes" . | nindent 8 }}
+{{- end }}

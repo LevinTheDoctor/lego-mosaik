@@ -1,0 +1,25 @@
+{{- if .Values.catalogImport.schedule }}
+# Regelmäßiger Import (ersetzt die Aktualisierung im Server-Prozess der lokalen App)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "lego-mosaik.fullname" . }}-katalog-import
+  labels:
+    {{- include "lego-mosaik.labels" . | nindent 4 }}
+    app.kubernetes.io/component: katalog-import
+spec:
+  schedule: {{ .Values.catalogImport.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            {{- include "lego-mosaik.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: katalog-import
+        spec:
+          {{- include "lego-mosaik.catalogImportPod" . | nindent 10 }}
+{{- end }}

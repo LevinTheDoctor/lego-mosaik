@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lego-mosaik.fullname" . }}
+  labels:
+    {{- include "lego-mosaik.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lego-mosaik.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "lego-mosaik.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "8080"
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "lego-mosaik.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Mosaike können Minuten dauern: laufende Anfragen zu Ende rechnen lassen
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        {{- include "lego-mosaik.commandContainer" (dict "root" . "name" "migrieren" "args" (list "migrieren" "--warten" "300")) | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "lego-mosaik.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["server"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            {{- include "lego-mosaik.env" . | nindent 12 }}
+          envFrom:
+            {{- include "lego-mosaik.envFrom" . | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            timeoutSeconds: 5
+          lifecycle:
+            preStop:
+              # Endpunkte aus dem Service nehmen lassen, bevor der Prozess beendet wird
+              sleep:
+                seconds: 5
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "lego-mosaik.volumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "lego-mosaik.volumes" . | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- with .Values.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        # Pods möglichst auf verschiedene Knoten verteilen
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "lego-mosaik.selectorLabels" . | nindent 20 }}
+        {{- end }}

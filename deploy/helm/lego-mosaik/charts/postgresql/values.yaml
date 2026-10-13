@@ -1,0 +1,31 @@
+# PostgreSQL für lego-mosaik. Für Produktion mit Backups/HA lieber eine verwaltete DB
+# oder einen Operator nutzen und im Hauptchart postgresql.enabled=false setzen.
+image:
+  repository: postgres
+  tag: "18-alpine"
+  pullPolicy: IfNotPresent
+
+auth:
+  username: lego
+  database: lego_mosaik
+  # Leer = beim ersten Install zufällig erzeugt und bei Upgrades beibehalten
+  password: ""
+  # Vorhandenes Secret mit Schlüssel "password" statt eines erzeugten
+  existingSecret: ""
+
+persistence:
+  enabled: true
+  size: 8Gi
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

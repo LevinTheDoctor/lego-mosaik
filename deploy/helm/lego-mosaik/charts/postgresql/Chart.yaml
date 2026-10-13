@@ -1,0 +1,6 @@
+apiVersion: v2
+name: postgresql
+description: Schlankes PostgreSQL (StatefulSet) für lego-mosaik
+type: application
+version: 0.1.0
+appVersion: "18"

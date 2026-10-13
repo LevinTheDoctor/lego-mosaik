@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lego-mosaik.fullname" . }}
+  labels:
+    {{- include "lego-mosaik.labels" . | nindent 4 }}
+data:
+  LEGO_MOSAIK_S3_ENDPOINT: {{ include "lego-mosaik.s3Endpoint" . | quote }}
+  LEGO_MOSAIK_S3_BUCKET: {{ .Values.s3.bucket | quote }}
+  LEGO_MOSAIK_S3_PREFIX: {{ .Values.s3.prefix | quote }}
+  LEGO_MOSAIK_S3_REGION: {{ .Values.s3.region | quote }}
+  LEGO_MOSAIK_PORT: "8080"
+  LEGO_MOSAIK_MAX_UPLOAD_MB: {{ .Values.config.maxUploadMb | quote }}
+  LEGO_MOSAIK_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  {{- with .Values.config.corsOriginRegex }}
+  LEGO_MOSAIK_CORS_ORIGIN_REGEX: {{ . | quote }}
+  {{- end }}
+  LEGO_MOSAIK_CATALOG_REFRESH_SECONDS: {{ .Values.config.catalogRefreshSeconds | quote }}
+  LEGO_MOSAIK_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LEGO_MOSAIK_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
+  LEGO_MOSAIK_SERVICE_NAME: {{ include "lego-mosaik.fullname" . | quote }}
+  {{- if .Values.studioColors.configMap }}
+  LEGO_MOSAIK_STUDIO_COLOR_FILE: {{ printf "/app/studio/%s" .Values.studioColors.key | quote }}
+  {{- end }}

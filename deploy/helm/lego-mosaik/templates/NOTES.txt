@@ -1,0 +1,17 @@
+LEGO-Mosaik ({{ .Chart.AppVersion }}) ist installiert.
+
+API lokal erreichen:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lego-mosaik.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://localhost:8080/actuator/health
+  open http://localhost:8080/docs
+
+Teilekatalog: Der Job {{ include "lego-mosaik.fullname" . }}-katalog-import-{{ .Release.Revision }} lädt ihn
+beim ersten Install (einige Minuten). Bis dahin meldet /actuator/health "katalog: UNKNOWN".
+
+Observability:
+  /actuator/health, /actuator/health/{liveness,readiness}, /actuator/info,
+  /actuator/metrics, /actuator/prometheus, /actuator/loggers
+{{- if not .Values.ingress.enabled }}
+
+Ingress ist aus. Die API hat keine Anmeldung – vor dem Öffnen eine Authentifizierung vorschalten.
+{{- end }}
