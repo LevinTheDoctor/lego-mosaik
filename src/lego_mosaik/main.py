@@ -60,9 +60,9 @@ lazy from lego_mosaik.imaging.color_space import LabColorSpace
 lazy from lego_mosaik.imaging.preparer import ImageEdits, PillowImagePreparer
 lazy from lego_mosaik.interfaces.api import create_app
 lazy from lego_mosaik.interfaces.cli import create_cli
-lazy from lego_mosaik.pipeline import MosaicPipeline, PipelineComponents
+lazy from lego_mosaik.pipeline import MosaicPipeline, MosaicResult, PipelineComponents
 lazy from lego_mosaik.pricing.bricklink_api import BrickLinkPriceSource
-lazy from lego_mosaik.pricing.cache import PriceCache
+lazy from lego_mosaik.pricing.cache import PriceCache, price_cache_key
 lazy from lego_mosaik.pricing.credentials import load_credentials
 lazy from lego_mosaik.pricing.protocol import PriceCacheProtocol
 lazy from lego_mosaik.pricing.service import PriceService
@@ -223,9 +223,6 @@ def build_price_service(
     ``pricing.cache_file`` (die Cloud-Variante übergibt einen PostgreSQL-Cache).
     """
     pricing = config.pricing
-    # Kennung der Abfrage im Cache: Preise in EUR werden nie als USD gelesen
-    region, country = pricing.region or "-", pricing.country_code or "-"
-    settings = "|".join((pricing.condition, pricing.currency, region, country, pricing.vat))
 
     def source() -> BrickLinkPriceSource:
         return BrickLinkPriceSource(
@@ -246,7 +243,8 @@ def build_price_service(
     return PriceService(
         pricing,
         output_dir=config.output_dir,
-        cache=cache or PriceCache(pricing.cache_file, settings, pricing.max_age_days),
+        cache=cache
+        or PriceCache(pricing.cache_file, price_cache_key(pricing), pricing.max_age_days),
         source_factory=source,
     )
 
@@ -306,6 +304,7 @@ def build_pipeline(
     catalog_source: PartCatalogSource | None = None,
     updater: CatalogUpdaterProtocol | None = None,
     id_suffix: Callable[[], str] | None = None,
+    observer: Callable[[MosaicResult], None] | None = None,
 ) -> MosaicPipeline:
     """Prüft die Konfiguration und baut die Pipeline mit allen Abhängigkeiten.
 
@@ -322,6 +321,7 @@ def build_pipeline(
         catalog_source=catalog_source or build_catalog_source(config.source),
         updater=updater or build_updater(config.source),
         id_suffix=id_suffix,
+        observer=observer,
         component_factory=build_components,
         method_names={
             "Dithering": tuple(DITHERERS),

@@ -5,13 +5,31 @@ Lokal liegen Paletten und Presets in JSON-Dateien und jedes Mosaik in einem Ordn
 mit PostgreSQL und S3; API und Bibliothek kennen nur diese Schnittstellen.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, MutableSequence, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from lego_mosaik.domain.library import ColorPalette, Preset, PresetOrder, SettingValue
+
+
+class ItemTable(Protocol):
+    """Liste von JSON-Einträgen, auf der Paletten- und Preset-Speicher aufbauen.
+
+    Lokal eine JSON-Datei (``storage/json_file.py``), in der Cloud eine PostgreSQL-Tabelle.
+    """
+
+    def read(self) -> list[dict[str, object]]:
+        """Alle Einträge."""
+        ...
+
+    def transaction(self) -> AbstractContextManager[MutableSequence[dict[str, object]]]:
+        """Einträge lesen, im ``with``-Block ändern und danach gesammelt speichern.
+
+        Wirft der Block eine Exception, bleibt alles unverändert.
+        """
+        ...
 
 
 class PaletteRepository(Protocol):

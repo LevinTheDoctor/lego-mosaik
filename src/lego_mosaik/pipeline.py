@@ -207,6 +207,7 @@ class MosaicPipeline:
         now: Uhr für den Ordnernamen (in Tests austauschbar).
         id_suffix: Liefert einen Zusatz für jeden Ordnernamen, z. B. ein Zufallskürzel.
             Nötig, wenn mehrere Prozesse Mosaike anlegen (Cloud); lokal ``None``.
+        observer: Wird nach jedem fertigen Mosaik aufgerufen (z. B. für Metriken).
     """
 
     def __init__(
@@ -219,6 +220,7 @@ class MosaicPipeline:
         method_names: Mapping[str, Sequence[str]],
         now: Callable[[], datetime] = datetime.now,
         id_suffix: Callable[[], str] | None = None,
+        observer: Callable[[MosaicResult], None] | None = None,
     ) -> None:
         self.config = config
         self._source = catalog_source
@@ -227,6 +229,7 @@ class MosaicPipeline:
         self.method_names = {kind: tuple(names) for kind, names in method_names.items()}
         self._now = now
         self._id_suffix = id_suffix
+        self._observer = observer
 
     # --- Katalog ---------------------------------------------------------------
 
@@ -374,7 +377,10 @@ class MosaicPipeline:
                 _keep_source(target_dir, image, image_format, inputs, title, edits, base)
             files = _write_outputs(build.components.writers, build.mosaic, target_dir)
         build.stats["dauer_sekunden"] = dict(timer.durations)
-        return MosaicResult(target_dir.name, build.mosaic, target_dir, files, build.stats)
+        result = MosaicResult(target_dir.name, build.mosaic, target_dir, files, build.stats)
+        if self._observer is not None:
+            self._observer(result)
+        return result
 
     def edit(
         self,

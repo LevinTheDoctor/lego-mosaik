@@ -17,6 +17,7 @@ from lego_mosaik.domain.library import (
     sort_presets,
 )
 from lego_mosaik.storage.json_file import JsonFile
+from lego_mosaik.storage.protocol import ItemTable
 
 
 def _utc_now() -> datetime:
@@ -30,12 +31,12 @@ class PresetStore:
     Formularfelder und die Pipeline kennt.
 
     Args:
-        path: JSON-Datei der Presets.
+        path: JSON-Datei der Presets oder eine andere ``ItemTable`` (Cloud: PostgreSQL).
         now: Uhr für ``erstellt``/``geaendert`` (in Tests austauschbar).
     """
 
-    def __init__(self, path: Path, now: Callable[[], datetime] = _utc_now) -> None:
-        self._file = JsonFile(path, "presets")
+    def __init__(self, path: Path | ItemTable, now: Callable[[], datetime] = _utc_now) -> None:
+        self._file: ItemTable = JsonFile(path, "presets") if isinstance(path, Path) else path
         self._now = now
 
     def list(

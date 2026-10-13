@@ -12,12 +12,22 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from lego_mosaik.config import PricingConfig
 from lego_mosaik.pricing.protocol import PriceGuide, PriceKey
 
 logger = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
 TEMP_SUFFIX = ".tmp"
+
+
+def price_cache_key(pricing: PricingConfig) -> str:
+    """Kennung der Abfrage-Einstellungen, z. B. ``"N|EUR|europe|-|Y"``.
+
+    Gehört zu jedem Cache-Schlüssel: Preise in EUR werden so nie als USD gelesen.
+    """
+    region, country = pricing.region or "-", pricing.country_code or "-"
+    return "|".join((pricing.condition, pricing.currency, region, country, pricing.vat))
 
 
 class PriceCache:

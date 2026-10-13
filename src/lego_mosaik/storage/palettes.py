@@ -6,6 +6,7 @@ from pathlib import Path
 from lego_mosaik.domain.errors import ConfigError, NotFoundError
 from lego_mosaik.domain.library import ColorPalette, check_description, check_name, slug
 from lego_mosaik.storage.json_file import JsonFile
+from lego_mosaik.storage.protocol import ItemTable
 
 
 class PaletteStore:
@@ -15,11 +16,11 @@ class PaletteStore:
     auch wenn die Palette umbenannt wird.
 
     Args:
-        path: JSON-Datei der Paletten.
+        path: JSON-Datei der Paletten oder eine andere ``ItemTable`` (Cloud: PostgreSQL).
     """
 
-    def __init__(self, path: Path) -> None:
-        self._file = JsonFile(path, "paletten")
+    def __init__(self, path: Path | ItemTable) -> None:
+        self._file: ItemTable = JsonFile(path, "paletten") if isinstance(path, Path) else path
 
     def list(self) -> tuple[ColorPalette, ...]:
         """Alle Paletten, nach Name sortiert."""
