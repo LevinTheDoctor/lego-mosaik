@@ -46,7 +46,7 @@ Die Pfade `daten/` und `ausgabe/` gelten relativ zum aktuellen Ordner. Der Befeh
 | `lego-mosaik farben` | Palette als Tabelle mit Farbfeld anzeigen |
 | `lego-mosaik formate` | Formate mit Größe in Noppen |
 | `lego-mosaik verfahren` | Registrierte Dithering-, Zerlegungs-, Stil- und Ausgabe-Namen |
-| `lego-mosaik server [--host] [--port]` | HTTP-API starten (Standard `127.0.0.1:8000`) |
+| `lego-mosaik server [--host] [--port] [--cors URL]` | HTTP-API starten (Standard `127.0.0.1:8000`) |
 
 Hilfe gibt es mit `-h`, `--hilfe` oder `--help`, auch für jeden Befehl (`lego-mosaik erstellen --hilfe`). `--debug` vor dem Befehl zeigt ausführliche Logs und Tracebacks.
 
@@ -137,7 +137,7 @@ Alle Standardwerte stehen **an einer Stelle**: `CONFIG` in `src/lego_mosaik/main
 | `outputs` | `preview_png`, `ldraw`, `parts_list_csv`, `official_parts_lists`, `instructions_png`, `result_json` |
 | `instructions` | Abschnitte 16 × 16, A4 quer, Kamera der 3D-Bilder (60° Höhe, 0° Drehung), Bauschritte senkrecht von oben, Größe der Schrittansicht, Schriften (normal und fett) |
 | `source` | Rebrickable-URL, Höchstalter 7 Tage, automatische Aktualisierung, nur aktuelle Teile (`recent_years` 3), Pfad zur Studio-Farbtabelle |
-| `server` | `127.0.0.1:8000`, Upload bis 20 MB, Katalogprüfung alle 24 h |
+| `server` | `127.0.0.1:8000`, Upload bis 20 MB, Katalogprüfung alle 24 h, CORS für `localhost` mit jedem Port (`cors_origin_regex`, `cors_origins`) |
 
 **Exotische Farben:**
 - `color_categories` legt fest, welche Oberflächen erlaubt sind: `solid`, `transparent`, `metallic`, `pearl`, `chrome`, `glitter`, `speckle`, `satin`, `milky`, `rubber`.
@@ -244,24 +244,29 @@ Zur Ausrichtung: `scripts/orientierung.py` erzeugt kleine Testmodelle (`ausgabe/
 uv run lego-mosaik server        # danach http://127.0.0.1:8000/docs im Browser
 ```
 
+**Für Frontends:** [`docs/api-frontend.md`](docs/api-frontend.md) beschreibt den Ablauf (Formular aus `/optionen`, Upload, Dateien anzeigen), CORS, Fehler und das Erzeugen von TypeScript-Typen.
+
 | Methode | Pfad | Zweck |
 | --- | --- | --- |
 | `GET` | `/gesundheit` | Status und Stand des Teilekatalogs |
+| `GET` | `/optionen` | Standardwerte, erlaubte Werte und Grenzen aller Formularfelder, Formate |
 | `GET` | `/farben?teile=plate,tile&exotisch=false` | Palette |
 | `GET` | `/verfahren` | Registrierte Verfahren und Ausgaben |
-| `POST` | `/mosaike` | Multipart: Datei `bild` plus optionale Felder wie bei `erstellen` (z. B. `unterbau`, `format`, `breite`, `stil`, `relief`, `relief_hoehe`, `aufraeumen`, `titel`, `eckenfarbe`, `rahmen_erhoehung`) → `201` mit ID, Statistik, Download-URLs |
+| `POST` | `/mosaike` | Multipart: Datei `bild` plus optionale Felder wie bei `erstellen` (z. B. `unterbau`, `format`, `breite`, `stil`, `relief`, `relief_hoehe`, `aufraeumen`, `titel`, `eckenfarbe`, `rahmen_erhoehung`) → `201` mit ID, Statistik, Download-URLs (wartet, bis das Mosaik fertig ist) |
 | `GET` | `/mosaike/{id}` | Inhalt von `ergebnis.json` |
 | `GET` | `/mosaike/{id}/dateien/{dateiname}` | Datei herunterladen (nur Namen aus `ergebnis.json`) |
 | `POST` | `/teile/aktualisieren?erzwingen=false` | Katalog aktualisieren |
 | `GET` | `/openapi.yaml` bzw. `/openapi.json` | API-Beschreibung (OpenAPI 3) |
 
-**OpenAPI:** Die vollständige Beschreibung aller Pfade, Felder und Fehlerantworten liegt als [`openapi.yaml`](openapi.yaml) im Projekt (OpenAPI 3.1). Sie wird aus der App erzeugt (`uv run python scripts/openapi_exportieren.py`); ein Test schlägt fehl, wenn sie nicht mehr zur API passt. Damit lassen sich z. B. Clients generieren oder die API in Postman/Bruno importieren.
+**OpenAPI:** Die vollständige Beschreibung aller Pfade, Felder und Fehlerantworten liegt als [`openapi.yaml`](openapi.yaml) im Projekt (OpenAPI 3.1). Sie wird aus der App erzeugt (`uv run python scripts/openapi_exportieren.py`); ein Test schlägt fehl, wenn sie nicht mehr zur API passt. Damit lassen sich z. B. Clients generieren oder die API in Postman/Bruno importieren. Auswahlfelder haben ihre erlaubten Werte als `enum`, Zahlen ihre Grenzen, und alle Antworten (auch `statistik` und `ergebnis.json`) sind vollständig beschrieben.
 
 ```bash
 curl -F bild=@katze.jpg -F format=quadrat -F stil=formen -F relief=motiv http://127.0.0.1:8000/mosaike
 ```
 
 Fehler kommen als `{"fehler": "…"}` mit `400` (kein Bild), `404`, `413` (zu groß) oder `422` (ungültige Angaben).
+
+**CORS:** Webseiten auf `localhost`, `127.0.0.1` oder `[::1]` dürfen die API mit jedem Port aufrufen (z. B. Vite auf `:5173`). Weitere Adressen gibt `--cors http://192.168.1.20:5173` frei (mehrfach möglich).
 
 > **Sicherheit:** Die API hat **keine Authentifizierung**. Sie bindet deshalb standardmäßig nur an `127.0.0.1`. Bitte nicht öffentlich erreichbar machen.
 
