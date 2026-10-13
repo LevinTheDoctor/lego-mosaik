@@ -1,13 +1,19 @@
 openapi: 3.1.0
 info:
   title: LEGO-Mosaik-Service
-  description: Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).
+  description: "Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).\n\nAblauf für\
+    \ ein Frontend:\n\n1. `GET /optionen` liefert Standardwerte und erlaubte Werte aller Formularfelder.\n\
+    2. `POST /mosaike` mit dem Bild (multipart) und optionalen Feldern. Die Antwort kommt,\n   wenn das\
+    \ Mosaik fertig ist (Sekunden bis wenige Minuten).\n3. Vorschau, Anleitung und Teilelisten über die\
+    \ URLs in `dateien` laden.\n\nFehler kommen immer als `{\"fehler\": \"…\"}` mit deutscher Meldung.\n"
   version: 0.1.0
 paths:
   /gesundheit:
     get:
+      tags:
+      - Katalog
       summary: Status und Stand des Teilekatalogs
-      operationId: health_gesundheit_get
+      operationId: get_health
       responses:
         '200':
           description: Successful Response
@@ -15,10 +21,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthModel'
+  /optionen:
+    get:
+      tags:
+      - Mosaike
+      summary: Standardwerte und erlaubte Werte der Formularfelder
+      operationId: get_options
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptionsModel'
   /farben:
     get:
+      tags:
+      - Katalog
       summary: Palette für Teilarten und Farbkategorien
-      operationId: colors_farben_get
+      operationId: list_colors
       parameters:
       - name: teile
         in: query
@@ -58,7 +79,7 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/ColorModel'
-                title: Response Colors Farben Get
+                title: Response List Colors
         '422':
           description: Ungültige Angaben
           content:
@@ -67,8 +88,10 @@ paths:
                 $ref: '#/components/schemas/ErrorModel'
   /verfahren:
     get:
+      tags:
+      - Katalog
       summary: Registrierte Verfahren und Ausgaben
-      operationId: methods_verfahren_get
+      operationId: list_methods
       responses:
         '200':
           description: Successful Response
@@ -80,11 +103,13 @@ paths:
                     type: string
                   type: array
                 type: object
-                title: Response Methods Verfahren Get
+                title: Response List Methods
   /teile/aktualisieren:
     post:
+      tags:
+      - Katalog
       summary: Rebrickable-Katalog aktualisieren
-      operationId: update_teile_aktualisieren_post
+      operationId: update_catalog
       parameters:
       - name: erzwingen
         in: query
@@ -104,7 +129,7 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/UpdateFileModel'
-                title: Response Update Teile Aktualisieren Post
+                title: Response Update Catalog
         '422':
           description: Validation Error
           content:
@@ -113,13 +138,15 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
   /mosaike:
     post:
+      tags:
+      - Mosaike
       summary: Mosaik erzeugen
-      operationId: create_mosaic_mosaike_post
+      operationId: create_mosaic
       requestBody:
         content:
           multipart/form-data:
             schema:
-              $ref: '#/components/schemas/Body_create_mosaic_mosaike_post'
+              $ref: '#/components/schemas/Body_create_mosaic'
         required: true
       responses:
         '201':
@@ -154,8 +181,10 @@ paths:
                 $ref: '#/components/schemas/ErrorModel'
   /mosaike/{mosaic_id}:
     get:
+      tags:
+      - Mosaike
       summary: Inhalt von ergebnis.json
-      operationId: get_mosaic_mosaike__mosaic_id__get
+      operationId: get_mosaic
       parameters:
       - name: mosaic_id
         in: path
@@ -169,9 +198,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Mosaic Mosaike  Mosaic Id  Get
+                $ref: '#/components/schemas/ResultModel'
         '404':
           description: Nicht gefunden
           content:
@@ -186,8 +213,10 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
   /mosaike/{mosaic_id}/dateien/{file_name}:
     get:
+      tags:
+      - Mosaike
       summary: Datei herunterladen
-      operationId: download_mosaike__mosaic_id__dateien__file_name__get
+      operationId: download_file
       parameters:
       - name: mosaic_id
         in: path
@@ -218,7 +247,7 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
-    Body_create_mosaic_mosaike_post:
+    Body_create_mosaic:
       properties:
         bild:
           type: string
@@ -228,36 +257,60 @@ components:
         unterbau:
           anyOf:
           - type: string
+            enum:
+            - art
+            - grundplatte
+            - platten
+            - ohne
           - type: 'null'
           title: Unterbau
-          description: art, platten, grundplatte oder ohne
+          description: 'Unterbau (Standard: art)'
         plattengroesse:
           anyOf:
           - type: integer
+            enum:
+            - 16
+            - 32
+            - 48
           - type: 'null'
           title: Plattengroesse
-          description: 16, 32 oder 48
+          description: 'Plattengröße in Noppen (Standard: 16)'
         format:
           anyOf:
           - type: string
+            enum:
+            - mini
+            - klein
+            - quadrat
+            - gross
+            - riesig
+            - quer
+            - hoch
+            - breit
+            - panorama
+            - weltkarte
           - type: 'null'
           title: Format
-          description: z. B. quadrat, quer, weltkarte
+          description: Format wie bei LEGO Art (statt platten)
         platten:
           anyOf:
           - type: string
           - type: 'null'
           title: Platten
-          description: BxH, z. B. 3x3
+          description: 'Platten als BxH, z. B. 3x3 (Standard: 3x3)'
         breite:
           anyOf:
           - type: integer
+            maximum: 384.0
+            minimum: 8.0
           - type: 'null'
           title: Breite
           description: Eigene Breite in Noppen
         hoehe:
           anyOf:
           - type: integer
+            maximum: 384.0
+            minimum: 8.0
           - type: 'null'
           title: Hoehe
           description: Eigene Höhe in Noppen
@@ -266,19 +319,20 @@ components:
           - type: integer
           - type: 'null'
           title: Unterbaufarbe
-          description: Rebrickable-ID
+          description: Rebrickable-ID (Standard je nach Unterbau)
         rahmen:
           anyOf:
           - type: integer
+            minimum: 0.0
           - type: 'null'
           title: Rahmen
-          description: Rahmenbreite in Noppen
+          description: 'Rahmenbreite in Noppen (Standard: 1)'
         rahmenfarbe:
           anyOf:
           - type: integer
           - type: 'null'
           title: Rahmenfarbe
-          description: Rebrickable-ID
+          description: 'Rebrickable-ID des Rahmens (Standard: 0)'
         eckenfarbe:
           anyOf:
           - type: integer
@@ -290,108 +344,145 @@ components:
           - type: string
           - type: 'null'
           title: Rahmen Teile
-          description: z. B. tile
+          description: 'Teilarten des Rahmens. Kommagetrennt aus: plate, tile, brick (Standard: tile)'
         rahmen_erhoehung:
           anyOf:
           - type: integer
+            maximum: 3.0
+            minimum: 0.0
           - type: 'null'
           title: Rahmen Erhoehung
-          description: Plates unter dem Rahmen
+          description: 'Plates unter dem Rahmen (Standard: 1)'
         modus:
           anyOf:
           - type: string
+            enum:
+            - zuschneiden
+            - einpassen
           - type: 'null'
           title: Modus
-          description: zuschneiden oder einpassen
+          description: 'Bild zuschneiden oder einpassen (Standard: zuschneiden)'
         kontrast:
           anyOf:
           - type: number
+            minimum: 0.0
           - type: 'null'
           title: Kontrast
-          description: 1.0 = unverändert
+          description: 'Kontrast, 1.0 = unverändert (Standard: 1.0)'
         saettigung:
           anyOf:
           - type: number
+            minimum: 0.0
           - type: 'null'
           title: Saettigung
-          description: 1.0 = unverändert
+          description: 'Sättigung, 1.0 = unverändert (Standard: 1.0)'
         teile:
           anyOf:
           - type: string
           - type: 'null'
           title: Teile
-          description: z. B. plate,tile
+          description: 'Teilarten des Bilds. Kommagetrennt aus: plate, tile, brick (Standard: plate,tile)'
         farbkategorien:
           anyOf:
           - type: string
           - type: 'null'
           title: Farbkategorien
-          description: z. B. solid,pearl
+          description: 'Farbkategorien. Kommagetrennt aus: solid, transparent, metallic, pearl, chrome,
+            glitter, speckle, satin, milky, rubber (Standard: solid)'
         exotische_farben:
           type: boolean
           title: Exotische Farben
-          description: Alle außer Gummi
+          description: 'Alle Farbkategorien außer Gummi (Standard: nein)'
           default: false
         max_farben:
           anyOf:
           - type: integer
+            maximum: 147456.0
+            minimum: 0.0
           - type: 'null'
           title: Max Farben
-          description: 0 = unbegrenzt
+          description: 'Höchstens so viele Farben, 0 = alle (Standard: 0)'
         stil:
           anyOf:
           - type: string
+            enum:
+            - quadrat
+            - formen
+            - punkte
+            - noppen
           - type: 'null'
           title: Stil
-          description: quadrat, formen, punkte, noppen
+          description: 'Stil der Bildteile (Standard: formen)'
         relief:
           anyOf:
           - type: string
+            enum:
+            - ohne
+            - motiv
+            - hell
+            - dunkel
           - type: 'null'
           title: Relief
-          description: ohne, motiv, hell, dunkel
+          description: 'Was erhöht wird (Standard: ohne)'
         relief_hoehe:
           anyOf:
           - type: integer
+            maximum: 3.0
+            minimum: 1.0
           - type: 'null'
           title: Relief Hoehe
-          description: 1 bis 3 Plates
+          description: 'Höchste Relief-Stufe in Plates (Standard: 1)'
         dithering:
           anyOf:
           - type: string
+            enum:
+            - nearest
+            - floyd_steinberg
+            - atkinson
+            - sierra_lite
+            - ordered
           - type: 'null'
           title: Dithering
-          description: Dithering-Verfahren
+          description: 'Dithering-Verfahren (Standard: floyd_steinberg)'
         staerke:
           anyOf:
           - type: number
+            maximum: 1.0
+            minimum: 0.0
           - type: 'null'
           title: Staerke
-          description: 0.0 bis 1.0
+          description: 'Dithering-Stärke (Standard: 1.0)'
         farbabstand:
           anyOf:
           - type: string
+            enum:
+            - cie76
+            - ciede2000
           - type: 'null'
           title: Farbabstand
-          description: cie76 oder ciede2000
+          description: 'Formel für den Farbabstand (Standard: ciede2000)'
         aufraeumen:
           anyOf:
           - type: boolean
           - type: 'null'
           title: Aufraeumen
-          description: Einzelne Pixel durch die Nachbarfarbe ersetzen (Comics, Logos)
+          description: 'Einzelne Pixel durch die Nachbarfarbe ersetzen (Standard: nein)'
         zerlegung:
           anyOf:
           - type: string
+            enum:
+            - single_stud
+            - greedy
           - type: 'null'
           title: Zerlegung
-          description: Zerlegungsverfahren
+          description: 'Zerlegungsverfahren (Standard: greedy)'
         ausgaben:
           anyOf:
           - type: string
           - type: 'null'
           title: Ausgaben
-          description: z. B. preview_png,ldraw
+          description: 'Erzeugte Dateien (ergebnis.json kommt immer dazu). Kommagetrennt aus: preview_png,
+            ldraw, parts_list_csv, official_parts_lists, instructions_png, result_json (Standard: preview_png,ldraw,parts_list_csv,official_parts_lists,instructions_png,result_json)'
         titel:
           anyOf:
           - type: string
@@ -401,7 +492,7 @@ components:
       type: object
       required:
       - bild
-      title: Body_create_mosaic_mosaike_post
+      title: Body_create_mosaic
     CatalogFileModel:
       properties:
         datei:
@@ -475,11 +566,73 @@ components:
         fehler:
           type: string
           title: Fehler
-          description: Deutsche Fehlermeldung
+          description: Deutsche Fehlermeldung, zum direkten Anzeigen gedacht
       type: object
       required:
       - fehler
       title: ErrorModel
+    FieldOptionModel:
+      properties:
+        standard:
+          $ref: '#/components/schemas/OptionValue'
+          description: Wert ohne Angabe; null = ergibt sich
+        werte:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Werte
+          description: Erlaubte Werte; leer = frei
+        mehrfach:
+          type: boolean
+          title: Mehrfach
+          description: Kommagetrennte Liste aus ``werte``
+        minimum:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Minimum
+          description: Kleinster erlaubter Wert
+        maximum:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Maximum
+          description: Größter erlaubter Wert
+      type: object
+      required:
+      - standard
+      - werte
+      - mehrfach
+      - minimum
+      - maximum
+      title: FieldOptionModel
+    FormatModel:
+      properties:
+        name:
+          type: string
+          title: Name
+          description: Wert für das Feld ``format``
+        platten_breite:
+          type: integer
+          title: Platten Breite
+          description: Platten nebeneinander
+        platten_hoehe:
+          type: integer
+          title: Platten Hoehe
+          description: Platten untereinander
+        beschreibung:
+          type: string
+          title: Beschreibung
+          description: Kurze Beschreibung
+      type: object
+      required:
+      - name
+      - platten_breite
+      - platten_hoehe
+      - beschreibung
+      title: FormatModel
     HTTPValidationError:
       properties:
         detail:
@@ -513,22 +666,236 @@ components:
           title: Id
           description: ID des Mosaiks (Name des Ausgabeordners)
         statistik:
-          additionalProperties: true
-          type: object
-          title: Statistik
-          description: Größe, Farben, Teile, Dauer
+          $ref: '#/components/schemas/StatsModel'
+          description: Kennzahlen des Mosaiks
         dateien:
           additionalProperties:
             type: string
           type: object
           title: Dateien
-          description: Dateiname → Download-URL
+          description: Dateiname → absolute Download-URL
       type: object
       required:
       - id
       - statistik
       - dateien
       title: MosaicCreatedModel
+    OptionValue:
+      anyOf:
+      - type: string
+      - type: integer
+      - type: number
+      - type: boolean
+      - type: 'null'
+    OptionsModel:
+      properties:
+        felder:
+          additionalProperties:
+            $ref: '#/components/schemas/FieldOptionModel'
+          type: object
+          title: Felder
+          description: Formularfeld von POST /mosaike → Standard und erlaubte Werte
+        formate:
+          items:
+            $ref: '#/components/schemas/FormatModel'
+          type: array
+          title: Formate
+          description: Formate wie bei LEGO Art
+      type: object
+      required:
+      - felder
+      - formate
+      title: OptionsModel
+    PaletteColorModel:
+      properties:
+        id:
+          type: integer
+          title: Id
+          description: Rebrickable-Farb-ID
+        name:
+          type: string
+          title: Name
+          description: Farbname (Rebrickable)
+        hex:
+          type: string
+          title: Hex
+          description: 'Farbwert als #RRGGBB'
+        ldraw_code:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Ldraw Code
+          description: LDraw-Farbcode
+        noppen:
+          type: integer
+          title: Noppen
+          description: Sichtbare Noppen in dieser Farbe
+      type: object
+      required:
+      - id
+      - name
+      - hex
+      - ldraw_code
+      - noppen
+      title: PaletteColorModel
+    ResultModel:
+      properties:
+        titel:
+          type: string
+          title: Titel
+          description: Name des Mosaiks (Titelblatt)
+        breite:
+          type: integer
+          title: Breite
+          description: Gesamtbreite in Noppen
+        hoehe:
+          type: integer
+          title: Hoehe
+          description: Gesamthöhe in Noppen
+        konfiguration:
+          additionalProperties: true
+          type: object
+          title: Konfiguration
+          description: Vollständige Konfiguration des Laufs (Standardwerte plus Angaben)
+        statistik:
+          $ref: '#/components/schemas/StatsModel'
+          description: Kennzahlen des Mosaiks
+        anzahl_teile:
+          type: integer
+          title: Anzahl Teile
+          description: Teile laut Teileliste (Summe aller Mengen)
+        palette:
+          items:
+            $ref: '#/components/schemas/PaletteColorModel'
+          type: array
+          title: Palette
+          description: Verwendete Farben
+        dateien:
+          items:
+            type: string
+          type: array
+          title: Dateien
+          description: Dateinamen; herunterladen über /mosaike/{id}/dateien/{name}
+      type: object
+      required:
+      - titel
+      - breite
+      - hoehe
+      - konfiguration
+      - statistik
+      - anzahl_teile
+      - palette
+      - dateien
+      title: ResultModel
+      description: Inhalt von ``ergebnis.json``.
+    StatsModel:
+      properties:
+        breite:
+          type: integer
+          title: Breite
+          description: Gesamtbreite in Noppen, mit Rahmen
+        hoehe:
+          type: integer
+          title: Hoehe
+          description: Gesamthöhe in Noppen, mit Rahmen
+        bild_breite:
+          type: integer
+          title: Bild Breite
+          description: Breite der Bildfläche in Noppen (ohne Rahmen)
+        bild_hoehe:
+          type: integer
+          title: Bild Hoehe
+          description: Höhe der Bildfläche in Noppen (ohne Rahmen)
+        teile:
+          type: integer
+          title: Teile
+          description: 'Alle Teile: Bild, Rahmen, Unterbau, Relief, Verbinder'
+        farben:
+          type: integer
+          title: Farben
+          description: Farben in der Teileliste (wie auf dem Titelblatt)
+        altfarben:
+          type: integer
+          title: Altfarben
+          description: Davon Farben, die in aktuellen Sets nicht mehr vorkommen
+        anteil_1x1:
+          type: number
+          title: Anteil 1X1
+          description: Anteil eckiger 1×1-Teile an allen Teilen (0 bis 1)
+        pixels:
+          type: integer
+          title: Pixels
+          description: Noppen der sichtbaren Oberfläche (Breite × Höhe)
+        parts:
+          type: integer
+          title: Parts
+          description: Teile der sichtbaren Oberfläche
+        savings_percent:
+          type: number
+          title: Savings Percent
+          description: Ersparnis gegenüber lauter 1×1-Teilen in %
+        stuetzteile:
+          type: integer
+          title: Stuetzteile
+          description: Plates unter einem erhöhten Rahmen
+        formteile:
+          type: integer
+          title: Formteile
+          description: Runde und schräge Teile im Bild
+        relief_teile:
+          type: integer
+          title: Relief Teile
+          description: Stützteile unter erhöhten Bildteilen
+        unterlagen:
+          type: integer
+          title: Unterlagen
+          description: Farbige Plates unter Formteilen
+        unterbau_platten:
+          type: integer
+          title: Unterbau Platten
+          description: Grundplatten, große Platten oder Art-Paneele
+        verbinder:
+          type: integer
+          title: Verbinder
+          description: Technic-Pins zwischen Art-Paneelen
+        verbindungsteile:
+          type: integer
+          title: Verbindungsteile
+          description: Plates, die große Platten verbinden
+        seiten:
+          type: integer
+          title: Seiten
+          description: Seiten der Bauanleitung (0 ohne Anleitung)
+        dauer_sekunden:
+          additionalProperties:
+            type: number
+          type: object
+          title: Dauer Sekunden
+          description: Dauer je Verarbeitungsschritt
+      type: object
+      required:
+      - breite
+      - hoehe
+      - bild_breite
+      - bild_hoehe
+      - teile
+      - farben
+      - altfarben
+      - anteil_1x1
+      - pixels
+      - parts
+      - savings_percent
+      - stuetzteile
+      - formteile
+      - relief_teile
+      - unterlagen
+      - unterbau_platten
+      - verbinder
+      - verbindungsteile
+      - seiten
+      - dauer_sekunden
+      title: StatsModel
+      description: Kennzahlen eines Mosaiks (``statistik`` in ``ergebnis.json``).
     UpdateFileModel:
       properties:
         datei:

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from lego_mosaik.config import AppConfig, MosaicOverrides, ServerConfig
 from lego_mosaik.interfaces.api import create_app, openapi_yaml
+from lego_mosaik.interfaces.api_models import StatsModel
 from lego_mosaik.main import CONFIG, build_pipeline
 
 
@@ -120,7 +121,7 @@ def test_openapi_yaml_is_served_and_up_to_date(client: TestClient) -> None:
     assert response.status_code == 200
     document = yaml.safe_load(response.text)
     assert document["openapi"].startswith("3.")
-    form = document["components"]["schemas"]["Body_create_mosaic_mosaike_post"]["properties"]
+    form = document["components"]["schemas"]["Body_create_mosaic"]["properties"]
     assert {"bild", "format", "stil", "relief", "titel"} <= set(form)
     # Die eingecheckte openapi.yaml muss zur App passen (neu: scripts/openapi_exportieren.py)
     committed = (Path(__file__).parent.parent / "openapi.yaml").read_text(encoding="utf-8")
@@ -130,3 +131,44 @@ def test_openapi_yaml_is_served_and_up_to_date(client: TestClient) -> None:
 def test_title_field_names_the_mosaic(client: TestClient, image_file: Path) -> None:
     body = _upload(client, image_file, titel="Über den Wolken", ausgaben="result_json")
     assert str(body["id"]).endswith("_Ueber_den_Wolken")
+
+
+def test_options_list_defaults_and_choices(client: TestClient) -> None:
+    body = client.get("/optionen").json()
+    fields = body["felder"]
+    assert fields["unterbau"]["werte"] == ["art", "grundplatte", "platten", "ohne"]
+    assert fields["teile"]["mehrfach"] is True
+    assert fields["relief_hoehe"]["minimum"] == 1
+    assert "floyd_steinberg" in fields["dithering"]["werte"]  # aus der Registry
+    assert {"quadrat", "weltkarte"} <= {f["name"] for f in body["formate"]}
+
+
+def test_form_schema_lists_allowed_values(client: TestClient) -> None:
+    document = yaml.safe_load(client.get("/openapi.yaml").text)
+    form = document["components"]["schemas"]["Body_create_mosaic"]["properties"]
+    assert form["relief"]["anyOf"][0]["enum"] == ["ohne", "motiv", "hell", "dunkel"]
+    assert "Kommagetrennt aus: plate, tile, brick" in form["teile"]["description"]
+
+
+def test_statistics_are_fully_described(client: TestClient, image_file: Path) -> None:
+    # Jede Kennzahl, die der Server liefert, steht im Modell (und damit in openapi.yaml)
+    body = _upload(client, image_file)
+    result = client.get(f"/mosaike/{body['id']}").json()
+    stats = body["statistik"]
+    assert isinstance(stats, dict)
+    assert set(stats) == set(result["statistik"]) == set(StatsModel.model_fields)
+    assert result["palette"][0].keys() == {"id", "name", "hex", "ldraw_code", "noppen"}
+
+
+def test_result_json_is_always_written(client: TestClient, image_file: Path) -> None:
+    body = _upload(client, image_file, ausgaben="preview_png")
+    dateien = body["dateien"]
+    assert isinstance(dateien, dict)
+    assert set(dateien) == {"vorschau.png", "ergebnis.json"}
+
+
+def test_cors_allows_local_frontends_only(client: TestClient) -> None:
+    local = client.get("/gesundheit", headers={"Origin": "http://localhost:5173"})
+    assert local.headers["access-control-allow-origin"] == "http://localhost:5173"
+    foreign = client.get("/gesundheit", headers={"Origin": "https://example.com"})
+    assert "access-control-allow-origin" not in foreign.headers

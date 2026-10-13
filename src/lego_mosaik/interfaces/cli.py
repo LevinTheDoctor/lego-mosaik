@@ -6,7 +6,7 @@ Die CLI enthält keine Fachlogik: Sie liest Optionen, übersetzt sie in
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated
 
@@ -15,7 +15,13 @@ lazy from rich.console import Console
 lazy from rich.logging import RichHandler
 lazy from rich.table import Table
 
-from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides, run_title
+from lego_mosaik.config import (
+    AppConfig,
+    OverrideInput,
+    parse_overrides,
+    run_title,
+    validate_config,
+)
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
 from lego_mosaik.domain.models import LegoColor
 from lego_mosaik.interfaces.display import print_formats, print_palette, print_summary
@@ -435,6 +441,21 @@ def _register_server(
     def server(
         host: Annotated[str | None, typer.Option(help="Adresse (Standard: 127.0.0.1).")] = None,
         port: Annotated[int | None, typer.Option(help="Port (Standard: 8000).")] = None,
+        cors: Annotated[
+            list[str] | None,
+            typer.Option(
+                help="Weitere Webseite, die die API aufrufen darf, z. B. http://192.168.1.5:5173 "
+                "(mehrfach möglich; localhost ist immer erlaubt)."
+            ),
+        ] = None,
     ) -> None:
         """Startet die lokale HTTP-API (FastAPI)."""
-        serve(config, host or config.server.host, port or config.server.port)
+        server_config = config
+        if cors:
+            origins = (*config.server.cors_origins, *(origin.rstrip("/") for origin in cors))
+            server_config = replace(config, server=replace(config.server, cors_origins=origins))
+            try:
+                validate_config(server_config)
+            except ConfigError as error:
+                raise typer.BadParameter(str(error), param_hint="--cors") from None
+        serve(server_config, host or config.server.host, port or config.server.port)

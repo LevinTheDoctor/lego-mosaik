@@ -2,7 +2,9 @@
 
 Hinweis zu Imports: Dieses Modul wird selbst nur ``lazy`` geladen (erst beim Befehl
 ``server``). FastAPI und Pydantic stehen hier als normale Imports, weil die
-Request-/Response-Modelle beim Laden des Moduls von ``BaseModel`` erben müssen.
+Request-/Response-Modelle (``api_models.py``) beim Laden von ``BaseModel`` erben müssen.
+
+Für Frontends: ``docs/api-frontend.md`` beschreibt Ablauf, Felder und Dateien.
 
 Sicherheit: Der Server bindet standardmäßig an 127.0.0.1 und hat keine
 Authentifizierung. Dateien werden nur ausgeliefert, wenn ihr Name in
@@ -10,11 +12,11 @@ Authentifizierung. Dateien werden nur ausgeliefert, wenn ihr Name in
 """
 
 import asyncio
-import json
 import logging
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, Any
@@ -22,14 +24,28 @@ from typing import Annotated, Any
 import yaml
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException
 
-from lego_mosaik.config import AppConfig, OverrideInput, parse_overrides, run_title
+from lego_mosaik.config import AppConfig, OverrideInput, ServerConfig, parse_overrides, run_title
 from lego_mosaik.domain.errors import ConfigError, InvalidImageError, LegoMosaicError
 from lego_mosaik.domain.models import LegoColor
-from lego_mosaik.pipeline import MosaicPipeline, safe_name
+from lego_mosaik.interfaces.api_models import (
+    CatalogFileModel,
+    ColorModel,
+    ErrorModel,
+    FieldOption,
+    HealthModel,
+    MosaicCreatedModel,
+    OptionsModel,
+    ResultModel,
+    UpdateFileModel,
+    form_options,
+    options_model,
+)
+from lego_mosaik.pipeline import FINAL_WRITER_NAME, MosaicPipeline, safe_name
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +57,22 @@ VALID_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 type PipelineFactory = Callable[[AppConfig], MosaicPipeline]
 
+DESCRIPTION = """Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).
 
-# --- Pydantic-Modelle (Feldbeschreibungen erscheinen in /docs) -----------------------
+Ablauf für ein Frontend:
+
+1. `GET /optionen` liefert Standardwerte und erlaubte Werte aller Formularfelder.
+2. `POST /mosaike` mit dem Bild (multipart) und optionalen Feldern. Die Antwort kommt,
+   wenn das Mosaik fertig ist (Sekunden bis wenige Minuten).
+3. Vorschau, Anleitung und Teilelisten über die URLs in `dateien` laden.
+
+Fehler kommen immer als `{"fehler": "…"}` mit deutscher Meldung.
+"""
+# Gruppen in /docs und in generierten Clients
+TAG_MOSAICS, TAG_CATALOG = "Mosaike", "Katalog"
 
 
-class ErrorModel(BaseModel):
-    fehler: str = Field(description="Deutsche Fehlermeldung")
+# --- Fehlerantworten (OpenAPI) ---------------------------------------------------------
 
 
 def _errors(*codes: int) -> dict[int | str, dict[str, Any]]:
@@ -59,39 +85,6 @@ def _errors(*codes: int) -> dict[int | str, dict[str, Any]]:
         500: "Verarbeitungsfehler",
     }
     return {code: {"model": ErrorModel, "description": texts[code]} for code in codes}
-
-
-class CatalogFileModel(BaseModel):
-    datei: str = Field(description="Dateiname der Rebrickable-CSV")
-    stand: str | None = Field(description="Letzte Änderung (ISO 8601, UTC) oder null")
-    veraltet: bool = Field(description="True, wenn die Datei fehlt oder zu alt ist")
-
-
-class HealthModel(BaseModel):
-    status: str = Field(description="„ok“, wenn der Server läuft")
-    katalog: list[CatalogFileModel] = Field(description="Stand der Katalogdateien")
-
-
-class ColorModel(BaseModel):
-    id: int = Field(description="Rebrickable-Farb-ID")
-    name: str = Field(description="Farbname (Rebrickable)")
-    hex: str = Field(description="Farbwert als #RRGGBB")
-    kategorie: str = Field(description="Oberfläche: solid, metallic, pearl, …")
-    ldraw_code: int | None = Field(description="LDraw-Farbcode")
-    bricklink_code: int | None = Field(description="BrickLink-Farbcode, falls bekannt")
-    lego_name: str | None = Field(description="Offizieller LEGO-Farbname, falls bekannt")
-
-
-class MosaicCreatedModel(BaseModel):
-    id: str = Field(description="ID des Mosaiks (Name des Ausgabeordners)")
-    statistik: dict[str, object] = Field(description="Größe, Farben, Teile, Dauer")
-    dateien: dict[str, str] = Field(description="Dateiname → Download-URL")
-
-
-class UpdateFileModel(BaseModel):
-    datei: str = Field(description="Dateiname")
-    status: str = Field(description="heruntergeladen, aktuell oder fehlgeschlagen")
-    hinweis: str = Field(description="Erklärung, bei Fehlern der Grund")
 
 
 # --- App-Fabrik ------------------------------------------------------------------------
@@ -110,13 +103,18 @@ def create_app(config: AppConfig, pipeline_factory: PipelineFactory) -> FastAPI:
 
     app = FastAPI(
         title="LEGO-Mosaik-Service",
-        description="Erzeugt aus Bildern baubare LEGO-Mosaike (lokal, ohne Authentifizierung).",
+        description=DESCRIPTION,
         version=version("lego-mosaik"),
         lifespan=lifespan,
+        # operationId = Funktionsname (create_mosaic statt create_mosaic_mosaike_post):
+        # ergibt lesbare Methodennamen in generierten Clients
+        generate_unique_id_function=_operation_id,
     )
+    _add_cors(app, config.server)
     _register_error_handlers(app)
-    _register_catalog_routes(app, pipeline)
-    _register_mosaic_routes(app, pipeline, config)
+    options = form_options(config, pipeline.method_names)
+    _register_catalog_routes(app, pipeline, options)
+    _register_mosaic_routes(app, pipeline, config, options)
 
     @app.get("/openapi.yaml", include_in_schema=False)
     def openapi_document() -> Response:
@@ -124,6 +122,28 @@ def create_app(config: AppConfig, pipeline_factory: PipelineFactory) -> FastAPI:
         return Response(openapi_yaml(app), media_type="application/yaml")
 
     return app
+
+
+def _operation_id(route: APIRoute) -> str:
+    return route.name
+
+
+def _add_cors(app: FastAPI, server: ServerConfig) -> None:
+    """Erlaubt Frontends auf anderen Origins (z. B. Vite auf localhost:5173) den Zugriff.
+
+    ``Content-Disposition`` wird freigegeben, damit das Frontend beim Download den
+    Dateinamen lesen kann.
+    """
+    if server.cors_origin_regex is None and not server.cors_origins:
+        return
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(server.cors_origins),
+        allow_origin_regex=server.cors_origin_regex,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
+    )
 
 
 def openapi_yaml(app: FastAPI) -> str:
@@ -173,11 +193,13 @@ def _register_error_handlers(app: FastAPI) -> None:
         )
 
 
-def _register_catalog_routes(app: FastAPI, pipeline: MosaicPipeline) -> None:
-    """``/gesundheit``, ``/farben``, ``/verfahren``, ``/teile/aktualisieren``."""
+def _register_catalog_routes(
+    app: FastAPI, pipeline: MosaicPipeline, options: dict[str, FieldOption]
+) -> None:
+    """``/gesundheit``, ``/optionen``, ``/farben``, ``/verfahren``, ``/teile/aktualisieren``."""
 
-    @app.get("/gesundheit", summary="Status und Stand des Teilekatalogs")
-    def health() -> HealthModel:
+    @app.get("/gesundheit", summary="Status und Stand des Teilekatalogs", tags=[TAG_CATALOG])
+    def get_health() -> HealthModel:
         files = [
             CatalogFileModel(
                 datei=info.file_name,
@@ -188,8 +210,21 @@ def _register_catalog_routes(app: FastAPI, pipeline: MosaicPipeline) -> None:
         ]
         return HealthModel(status="ok", katalog=files)
 
-    @app.get("/farben", summary="Palette für Teilarten und Farbkategorien", responses=_errors(422))
-    def colors(
+    @app.get(
+        "/optionen",
+        summary="Standardwerte und erlaubte Werte der Formularfelder",
+        tags=[TAG_MOSAICS],
+    )
+    def get_options() -> OptionsModel:
+        return options_model(options)
+
+    @app.get(
+        "/farben",
+        summary="Palette für Teilarten und Farbkategorien",
+        responses=_errors(422),
+        tags=[TAG_CATALOG],
+    )
+    def list_colors(
         teile: Annotated[str | None, Query(description="z. B. plate,tile")] = None,
         farbkategorien: Annotated[str | None, Query(description="z. B. solid,pearl")] = None,
         exotisch: Annotated[bool, Query(description="Alle Kategorien außer Gummi")] = False,
@@ -199,12 +234,14 @@ def _register_catalog_routes(app: FastAPI, pipeline: MosaicPipeline) -> None:
         )
         return [_color_model(color) for color in pipeline.palette(parse_overrides(raw))]
 
-    @app.get("/verfahren", summary="Registrierte Verfahren und Ausgaben")
-    def methods() -> dict[str, list[str]]:
+    @app.get("/verfahren", summary="Registrierte Verfahren und Ausgaben", tags=[TAG_CATALOG])
+    def list_methods() -> dict[str, list[str]]:
         return {kind: list(names) for kind, names in pipeline.method_names.items()}
 
-    @app.post("/teile/aktualisieren", summary="Rebrickable-Katalog aktualisieren")
-    def update(
+    @app.post(
+        "/teile/aktualisieren", summary="Rebrickable-Katalog aktualisieren", tags=[TAG_CATALOG]
+    )
+    def update_catalog(
         erzwingen: Annotated[bool, Query(description="Auch aktuelle Dateien neu laden")] = False,
     ) -> list[UpdateFileModel]:
         report = pipeline.update_catalog(force=erzwingen)
@@ -226,9 +263,20 @@ def _color_model(color: LegoColor) -> ColorModel:
     )
 
 
-def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppConfig) -> None:
+def _register_mosaic_routes(
+    app: FastAPI, pipeline: MosaicPipeline, config: AppConfig, options: dict[str, FieldOption]
+) -> None:
     """``POST /mosaike``, ``GET /mosaike/{id}``, ``GET /mosaike/{id}/dateien/{name}``."""
     max_bytes = config.server.max_upload_mb * BYTES_PER_MB
+
+    def field(name: str, json_type: str, description: str, alias: str | None = None) -> Any:
+        """Formularfeld mit Standardwert und erlaubten Werten aus ``options``."""
+        option = options[name]
+        return Form(
+            alias=alias,
+            description=option.describe(description),
+            json_schema_extra=option.schema(json_type),
+        )
 
     # Normales def (kein async def): FastAPI führt es im Threadpool aus, der Server
     # bleibt während der rechenintensiven Mosaikerzeugung ansprechbar
@@ -237,47 +285,85 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
         status_code=status.HTTP_201_CREATED,
         summary="Mosaik erzeugen",
         responses=_errors(400, 413, 422, 500),
+        tags=[TAG_MOSAICS],
     )
     def create_mosaic(
         request: Request,
         bild: Annotated[UploadFile, File(description="Bilddatei (JPG, PNG, …)")],
-        unterbau: Annotated[
-            str | None, Form(description="art, platten, grundplatte oder ohne")
+        unterbau: Annotated[str | None, field("unterbau", "string", "Unterbau")] = None,
+        plattengroesse: Annotated[
+            int | None, field("plattengroesse", "integer", "Plattengröße in Noppen")
         ] = None,
-        plattengroesse: Annotated[int | None, Form(description="16, 32 oder 48")] = None,
         format_name: Annotated[
-            str | None, Form(alias="format", description="z. B. quadrat, quer, weltkarte")
+            str | None,
+            field("format", "string", "Format wie bei LEGO Art (statt platten)", alias="format"),
         ] = None,
-        platten: Annotated[str | None, Form(description="BxH, z. B. 3x3")] = None,
-        breite: Annotated[int | None, Form(description="Eigene Breite in Noppen")] = None,
-        hoehe: Annotated[int | None, Form(description="Eigene Höhe in Noppen")] = None,
-        unterbaufarbe: Annotated[int | None, Form(description="Rebrickable-ID")] = None,
-        rahmen: Annotated[int | None, Form(description="Rahmenbreite in Noppen")] = None,
-        rahmenfarbe: Annotated[int | None, Form(description="Rebrickable-ID")] = None,
-        eckenfarbe: Annotated[int | None, Form(description="Rebrickable-ID der Ecken")] = None,
-        rahmen_teile: Annotated[str | None, Form(description="z. B. tile")] = None,
-        rahmen_erhoehung: Annotated[int | None, Form(description="Plates unter dem Rahmen")] = None,
-        modus: Annotated[str | None, Form(description="zuschneiden oder einpassen")] = None,
-        kontrast: Annotated[float | None, Form(description="1.0 = unverändert")] = None,
-        saettigung: Annotated[float | None, Form(description="1.0 = unverändert")] = None,
-        teile: Annotated[str | None, Form(description="z. B. plate,tile")] = None,
-        farbkategorien: Annotated[str | None, Form(description="z. B. solid,pearl")] = None,
-        exotische_farben: Annotated[bool, Form(description="Alle außer Gummi")] = False,
-        max_farben: Annotated[int | None, Form(description="0 = unbegrenzt")] = None,
-        stil: Annotated[str | None, Form(description="quadrat, formen, punkte, noppen")] = None,
-        relief: Annotated[str | None, Form(description="ohne, motiv, hell, dunkel")] = None,
-        relief_hoehe: Annotated[int | None, Form(description="1 bis 3 Plates")] = None,
-        dithering: Annotated[str | None, Form(description="Dithering-Verfahren")] = None,
-        staerke: Annotated[float | None, Form(description="0.0 bis 1.0")] = None,
-        farbabstand: Annotated[str | None, Form(description="cie76 oder ciede2000")] = None,
+        platten: Annotated[
+            str | None, field("platten", "string", "Platten als BxH, z. B. 3x3")
+        ] = None,
+        breite: Annotated[int | None, field("breite", "integer", "Eigene Breite in Noppen")] = None,
+        hoehe: Annotated[int | None, field("hoehe", "integer", "Eigene Höhe in Noppen")] = None,
+        unterbaufarbe: Annotated[
+            int | None,
+            field("unterbaufarbe", "integer", "Rebrickable-ID (Standard je nach Unterbau)"),
+        ] = None,
+        rahmen: Annotated[int | None, field("rahmen", "integer", "Rahmenbreite in Noppen")] = None,
+        rahmenfarbe: Annotated[
+            int | None, field("rahmenfarbe", "integer", "Rebrickable-ID des Rahmens")
+        ] = None,
+        eckenfarbe: Annotated[
+            int | None, field("eckenfarbe", "integer", "Rebrickable-ID der Ecken")
+        ] = None,
+        rahmen_teile: Annotated[
+            str | None, field("rahmen_teile", "string", "Teilarten des Rahmens")
+        ] = None,
+        rahmen_erhoehung: Annotated[
+            int | None, field("rahmen_erhoehung", "integer", "Plates unter dem Rahmen")
+        ] = None,
+        modus: Annotated[
+            str | None, field("modus", "string", "Bild zuschneiden oder einpassen")
+        ] = None,
+        kontrast: Annotated[
+            float | None, field("kontrast", "number", "Kontrast, 1.0 = unverändert")
+        ] = None,
+        saettigung: Annotated[
+            float | None, field("saettigung", "number", "Sättigung, 1.0 = unverändert")
+        ] = None,
+        teile: Annotated[str | None, field("teile", "string", "Teilarten des Bilds")] = None,
+        farbkategorien: Annotated[
+            str | None, field("farbkategorien", "string", "Farbkategorien")
+        ] = None,
+        exotische_farben: Annotated[
+            bool, Form(description="Alle Farbkategorien außer Gummi (Standard: nein)")
+        ] = False,
+        max_farben: Annotated[
+            int | None, field("max_farben", "integer", "Höchstens so viele Farben, 0 = alle")
+        ] = None,
+        stil: Annotated[str | None, field("stil", "string", "Stil der Bildteile")] = None,
+        relief: Annotated[str | None, field("relief", "string", "Was erhöht wird")] = None,
+        relief_hoehe: Annotated[
+            int | None, field("relief_hoehe", "integer", "Höchste Relief-Stufe in Plates")
+        ] = None,
+        dithering: Annotated[
+            str | None, field("dithering", "string", "Dithering-Verfahren")
+        ] = None,
+        staerke: Annotated[float | None, field("staerke", "number", "Dithering-Stärke")] = None,
+        farbabstand: Annotated[
+            str | None, field("farbabstand", "string", "Formel für den Farbabstand")
+        ] = None,
         aufraeumen: Annotated[
             bool | None,
-            Form(description="Einzelne Pixel durch die Nachbarfarbe ersetzen (Comics, Logos)"),
+            field("aufraeumen", "boolean", "Einzelne Pixel durch die Nachbarfarbe ersetzen"),
         ] = None,
-        zerlegung: Annotated[str | None, Form(description="Zerlegungsverfahren")] = None,
-        ausgaben: Annotated[str | None, Form(description="z. B. preview_png,ldraw")] = None,
+        zerlegung: Annotated[
+            str | None, field("zerlegung", "string", "Zerlegungsverfahren")
+        ] = None,
+        ausgaben: Annotated[
+            str | None,
+            field("ausgaben", "string", "Erzeugte Dateien (ergebnis.json kommt immer dazu)"),
+        ] = None,
         titel: Annotated[
-            str | None, Form(description="Name auf dem Titelblatt (Standard: Dateiname)")
+            str | None, field("titel", "string", "Name auf dem Titelblatt (Standard: Dateiname)")
         ] = None,
     ) -> MosaicCreatedModel:
         data = _read_limited(bild, max_bytes)
@@ -313,32 +399,39 @@ def _register_mosaic_routes(app: FastAPI, pipeline: MosaicPipeline, config: AppC
             title=titel,
         )
         overrides = parse_overrides(raw)
+        # ergebnis.json braucht die API immer: Dateiliste und Statistik kommen daraus
+        if overrides.outputs and FINAL_WRITER_NAME not in overrides.outputs:
+            overrides = replace(overrides, outputs=(*overrides.outputs, FINAL_WRITER_NAME))
         title = run_title(raw, safe_name(Path(bild.filename or "mosaik").stem))
         result = pipeline.run(data, overrides, title=title)
-        files = _result_files(result.target_dir)
+        content = _result(result.target_dir)
         base_url = str(request.base_url).rstrip("/")
-        urls = {name: f"{base_url}/mosaike/{result.id}/dateien/{name}" for name in files}
-        return MosaicCreatedModel(id=result.id, statistik=result.stats, dateien=urls)
+        urls = {name: f"{base_url}/mosaike/{result.id}/dateien/{name}" for name in content.dateien}
+        return MosaicCreatedModel(id=result.id, statistik=content.statistik, dateien=urls)
 
-    @app.get("/mosaike/{mosaic_id}", summary="Inhalt von ergebnis.json", responses=_errors(404))
-    def get_mosaic(mosaic_id: str) -> dict[str, object]:
-        result_path = _mosaic_dir(config.output_dir, mosaic_id) / RESULT_FILE
-        content: dict[str, object] = json.loads(result_path.read_text(encoding="utf-8"))
-        return content
+    @app.get(
+        "/mosaike/{mosaic_id}",
+        summary="Inhalt von ergebnis.json",
+        responses=_errors(404),
+        tags=[TAG_MOSAICS],
+    )
+    def get_mosaic(mosaic_id: str) -> ResultModel:
+        return _result(_mosaic_dir(config.output_dir, mosaic_id))
 
     @app.get(
         "/mosaike/{mosaic_id}/dateien/{file_name}",
         summary="Datei herunterladen",
         response_class=FileResponse,
+        tags=[TAG_MOSAICS],
         responses={
             200: {"description": "Die Datei (PNG, PDF, LDraw, CSV, XML oder JSON)"},
             **_errors(404),
         },
     )
-    def download(mosaic_id: str, file_name: str) -> FileResponse:
+    def download_file(mosaic_id: str, file_name: str) -> FileResponse:
         directory = _mosaic_dir(config.output_dir, mosaic_id)
         # Nur Namen aus ergebnis.json; der Pfad wird nie direkt aus der URL gebaut
-        if file_name not in _result_files(directory):
+        if file_name not in _result(directory).dateien:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Datei „{file_name}“ gibt es nicht.")
         return FileResponse(directory / file_name, filename=file_name)
 
@@ -362,8 +455,6 @@ def _mosaic_dir(output_dir: Path, mosaic_id: str) -> Path:
     return directory
 
 
-def _result_files(directory: Path) -> list[str]:
-    """Dateinamen laut ``ergebnis.json`` (die einzige Quelle für erlaubte Downloads)."""
-    content = json.loads((directory / RESULT_FILE).read_text(encoding="utf-8"))
-    files = content.get("dateien", [])
-    return [str(name) for name in files]
+def _result(directory: Path) -> ResultModel:
+    """``ergebnis.json`` eines Mosaiks; seine Dateiliste ist die einzige Quelle für Downloads."""
+    return ResultModel.model_validate_json((directory / RESULT_FILE).read_bytes())

@@ -8,6 +8,7 @@ from lego_mosaik.config import (
     AppConfig,
     MosaicOverrides,
     OverrideInput,
+    ServerConfig,
     apply_overrides,
     parse_fit_mode,
     parse_overrides,
@@ -134,3 +135,18 @@ def test_substrate_color_defaults_per_substrate(app_config: AppConfig) -> None:
     art = dataclasses.replace(layout, substrate=Substrate.ART_PANEL)
     assert substrate_color_id(art) == 0  # Art-Paneel: Black
     assert substrate_color_id(dataclasses.replace(art, substrate_color_id=15)) == 15
+
+
+@pytest.mark.parametrize(
+    ("server", "message"),
+    [
+        (ServerConfig(cors_origins=("http://localhost:5173/app",)), "CORS-Origin"),
+        (ServerConfig(cors_origins=("localhost:5173",)), "CORS-Origin"),
+        (ServerConfig(cors_origin_regex="(localhost"), "CORS-Regex"),
+    ],
+)
+def test_invalid_cors_settings_rejected(
+    app_config: AppConfig, server: ServerConfig, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        validate_config(dataclasses.replace(app_config, server=server))

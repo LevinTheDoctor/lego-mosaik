@@ -5,6 +5,7 @@ Root). Dieses Modul beschreibt nur die *Form* der Konfiguration und enthält die
 einzige Stelle, an der Eingaben aus CLI und API geprüft und angewendet werden.
 """
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
@@ -41,6 +42,9 @@ DOT_STYLES = frozenset({"punkte", "noppen"})
 MAX_RECENT_YEARS = 100
 MAX_MIN_COLOR_SHARE = 0.1  # mehr als 10 % Mindestanteil würde ganze Bildteile umfärben
 MAX_SUBSAMPLE = 12  # Teilpixel pro Noppe und Richtung bei der Formwahl
+# Origins lokaler Frontends (CORS): http(s)://localhost, 127.0.0.1 oder [::1] mit beliebigem Port
+ORIGIN = re.compile(r"https?://[^/\s]+")  # ein einzelner Origin: Schema und Host, kein Pfad
+LOCAL_ORIGINS = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
 
 
 # Deutsche Bezeichnungen für CLI, API und interaktiven Modus → interne Enum-Werte
@@ -322,6 +326,10 @@ class ServerConfig:
     port: int = 8000
     max_upload_mb: int = 20
     update_interval_hours: int = 24
+    # Webseiten, die die API im Browser aufrufen dürfen (CORS): Regex für den Origin, z. B.
+    # jeder Port auf localhost (Vite, React-Dev-Server), plus einzelne Origins. None/() = keine
+    cors_origin_regex: str | None = LOCAL_ORIGINS
+    cors_origins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,6 +532,7 @@ def validate_config(config: AppConfig) -> None:
         _check_range("Aktuelle Jahre", config.source.recent_years, 1, MAX_RECENT_YEARS)
     _check_range("Port", config.server.port, MIN_PORT, MAX_PORT)
     _check_range("Upload-Grenze", config.server.max_upload_mb, 1, 1024, "MB")
+    _check_cors(config.server)
 
 
 def _check_range(label: str, value: float, minimum: float, maximum: float, unit: str = "") -> None:
@@ -590,6 +599,20 @@ def _check_shapes(config: AppConfig) -> None:
         raise ConfigError(
             f"Der Stil „{shapes.style}“ geht nur mit Plates und Tiles, nicht mit Bricks."
         )
+
+
+def _check_cors(server: ServerConfig) -> None:
+    """Der CORS-Regex muss sich übersetzen lassen, Origins sind ``schema://host[:port]``."""
+    if server.cors_origin_regex is not None:
+        try:
+            re.compile(server.cors_origin_regex)
+        except re.error as error:
+            raise ConfigError(f"CORS-Regex ungültig: {error}.") from None
+    for origin in server.cors_origins:
+        if not ORIGIN.fullmatch(origin):
+            raise ConfigError(
+                f"CORS-Origin „{origin}“ ungültig. Beispiel: http://localhost:5173 (ohne /)."
+            )
 
 
 def _check_frame(frame: FrameConfig) -> None:
