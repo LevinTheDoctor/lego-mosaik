@@ -8,6 +8,7 @@ Konfiguration in deren Konstruktorparameter (Dependency Injection).
 
 import functools
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -63,7 +64,9 @@ lazy from lego_mosaik.pipeline import MosaicPipeline, PipelineComponents
 lazy from lego_mosaik.pricing.bricklink_api import BrickLinkPriceSource
 lazy from lego_mosaik.pricing.cache import PriceCache
 lazy from lego_mosaik.pricing.credentials import load_credentials
+lazy from lego_mosaik.pricing.protocol import PriceCacheProtocol
 lazy from lego_mosaik.pricing.service import PriceService
+lazy from lego_mosaik.sources.protocol import CatalogUpdaterProtocol, PartCatalogSource
 lazy from lego_mosaik.sources.rebrickable_csv import RebrickableCsvSource
 lazy from lego_mosaik.sources.updater import CatalogUpdater
 lazy from lego_mosaik.tiling.protocol import TilingStrategy
@@ -208,12 +211,16 @@ def build_updater(
 
 
 def build_price_service(
-    config: AppConfig, transport: httpx.BaseTransport | None = None
+    config: AppConfig,
+    transport: httpx.BaseTransport | None = None,
+    *,
+    cache: PriceCacheProtocol | None = None,
 ) -> PriceService:
     """Preisschätzung über BrickLink (``transport`` nur für Tests).
 
     Die Zugangsdaten werden erst gelesen, wenn wirklich abgefragt wird; ``--offline``
-    funktioniert deshalb auch ohne sie.
+    funktioniert deshalb auch ohne sie. Ohne ``cache`` liegen die Preise in
+    ``pricing.cache_file`` (die Cloud-Variante übergibt einen PostgreSQL-Cache).
     """
     pricing = config.pricing
     # Kennung der Abfrage im Cache: Preise in EUR werden nie als USD gelesen
@@ -239,7 +246,7 @@ def build_price_service(
     return PriceService(
         pricing,
         output_dir=config.output_dir,
-        cache=PriceCache(pricing.cache_file, settings, pricing.max_age_days),
+        cache=cache or PriceCache(pricing.cache_file, settings, pricing.max_age_days),
         source_factory=source,
     )
 
@@ -293,8 +300,17 @@ def build_components(config: AppConfig) -> PipelineComponents:
     )
 
 
-def build_pipeline(config: AppConfig) -> MosaicPipeline:
+def build_pipeline(
+    config: AppConfig,
+    *,
+    catalog_source: PartCatalogSource | None = None,
+    updater: CatalogUpdaterProtocol | None = None,
+    id_suffix: Callable[[], str] | None = None,
+) -> MosaicPipeline:
     """Prüft die Konfiguration und baut die Pipeline mit allen Abhängigkeiten.
+
+    Ohne ``catalog_source``/``updater`` kommt der Katalog aus den lokalen CSV-Dateien;
+    die Cloud-Variante setzt hier PostgreSQL ein.
 
     Raises:
         ConfigError: Bei ungültigen Werten oder unbekannten Registry-Namen.
@@ -303,8 +319,9 @@ def build_pipeline(config: AppConfig) -> MosaicPipeline:
     validate_registry_names(config)
     return MosaicPipeline(
         config,
-        catalog_source=build_catalog_source(config.source),
-        updater=build_updater(config.source),
+        catalog_source=catalog_source or build_catalog_source(config.source),
+        updater=updater or build_updater(config.source),
+        id_suffix=id_suffix,
         component_factory=build_components,
         method_names={
             "Dithering": tuple(DITHERERS),

@@ -25,14 +25,13 @@ from lego_mosaik.outputs.price_list import (
 )
 from lego_mosaik.outputs.result_json import FILE_NAME as RESULT_FILE
 from lego_mosaik.outputs.result_json import find_mosaic, order_item_from_json, update_result
-from lego_mosaik.pricing.cache import PriceCache
 from lego_mosaik.pricing.estimate import (
     NO_PRICE_DATA,
     NOT_CACHED,
     PriceEstimate,
     estimate_prices,
 )
-from lego_mosaik.pricing.protocol import PriceGuide, PriceKey, PriceSource
+from lego_mosaik.pricing.protocol import PriceCacheProtocol, PriceGuide, PriceKey, PriceSource
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ class PriceService:
     Args:
         pricing: Einstellungen (Währung, Zustand, Höchstpreis-Faktor, …).
         output_dir: Ordner mit allen Mosaiken (für IDs und „das neueste“).
-        cache: Lokaler Preis-Cache.
+        cache: Preis-Cache (lokal JSON, in der Cloud PostgreSQL).
         source_factory: Erzeugt die Preisquelle erst, wenn wirklich abgefragt wird.
             So braucht ``--offline`` keine Zugangsdaten.
     """
@@ -55,7 +54,7 @@ class PriceService:
         pricing: PricingConfig,
         *,
         output_dir: Path,
-        cache: PriceCache,
+        cache: PriceCacheProtocol,
         source_factory: SourceFactory,
     ) -> None:
         self.pricing = pricing

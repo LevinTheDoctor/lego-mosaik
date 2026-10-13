@@ -9,15 +9,18 @@ Für Frontends: ``docs/api-frontend.md`` beschreibt Ablauf, Felder und Dateien.
 Sicherheit: Der Server bindet standardmäßig an 127.0.0.1 und hat keine
 Authentifizierung. Dateien werden nur ausgeliefert, wenn ihr Name in
 ``ergebnis.json`` steht (Schutz vor Path Traversal).
+
+Speicher: Paletten, Presets und Mosaike kommen über ``ApiBackend``. Ohne Angabe sind es
+die lokalen Dateien; die Cloud-Variante (``lego_mosaik_cloud``) setzt PostgreSQL und S3 ein.
 """
 
 import asyncio
 import base64
 import logging
-import re
+import mimetypes
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, Any
@@ -27,7 +30,7 @@ import yaml
 from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException
 
@@ -83,6 +86,8 @@ from lego_mosaik.outputs.raster_json import FILE_NAME as RASTER_FILE
 from lego_mosaik.pipeline import FINAL_WRITER_NAME, MosaicPipeline, MosaicResult, safe_name
 from lego_mosaik.pricing.service import PriceService, read_order_items
 from lego_mosaik.storage.library import Library
+from lego_mosaik.storage.mosaics import LocalMosaicRepository
+from lego_mosaik.storage.protocol import MosaicRepository
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +98,6 @@ RESULT_FILE = "ergebnis.json"
 REQUIRED_OUTPUTS = ("raster_json", FINAL_WRITER_NAME)
 PREVIEW_PX, MIN_PREVIEW_PX, MAX_PREVIEW_PX = 800, 64, 2048
 MASK_PREVIEW_PX = 512
-# IDs sind Ordnernamen der Form 2026-10-12_143005_katze (nur sichere Zeichen)
-VALID_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 type PipelineFactory = Callable[[AppConfig], MosaicPipeline]
 type PriceFactory = Callable[[AppConfig], PriceService]
@@ -124,6 +127,27 @@ TAG_MOSAICS, TAG_CATALOG, TAG_BRICKLINK = "Mosaike", "Katalog", "BrickLink"
 TAG_IMAGE, TAG_PALETTES, TAG_PRESETS = "Bild", "Paletten", "Presets"
 
 
+@dataclass(frozen=True, slots=True)
+class ApiBackend:
+    """Speicher und Hintergrundaufgaben der API.
+
+    Attributes:
+        library: Eigene Paletten und Presets.
+        mosaics: Fertige Mosaike.
+        catalog_auto_update: Katalog im Server-Prozess regelmäßig aktualisieren. Die
+            Cloud-Variante macht das per CronJob und schaltet es hier ab.
+    """
+
+    library: Library
+    mosaics: MosaicRepository
+    catalog_auto_update: bool = True
+
+    @classmethod
+    def local(cls, config: AppConfig) -> ApiBackend:
+        """Dateien aus der Konfiguration: ``daten/*.json`` und ``ausgabe/``."""
+        return cls(Library.open(config.storage), LocalMosaicRepository(config.output_dir))
+
+
 # --- Fehlerantworten (OpenAPI) ---------------------------------------------------------
 
 
@@ -148,17 +172,24 @@ def create_app(
     config: AppConfig,
     pipeline_factory: PipelineFactory,
     price_factory: PriceFactory | None = None,
+    *,
+    backend: ApiBackend | None = None,
 ) -> FastAPI:
     """Baut die FastAPI-App (Factory) mit Hintergrund-Aktualisierung des Katalogs.
 
     Ohne ``price_factory`` fehlt nur die Preisschätzung (``/mosaike/{id}/preise``).
+    Ohne ``backend`` speichert die App lokal (``ApiBackend.local``).
     """
     pipeline = pipeline_factory(config)
-    library = Library.open(config.storage)
+    backend = backend or ApiBackend.local(config)
+    library, mosaics = backend.library, backend.mosaics
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """Läuft beim Start (vor yield) und beim Beenden (nach yield) des Servers."""
+        if not backend.catalog_auto_update:
+            yield
+            return
         task = asyncio.create_task(_update_periodically(pipeline, config))
         yield
         task.cancel()  # Hintergrund-Task beim Herunterfahren beenden
@@ -177,10 +208,10 @@ def create_app(
     options = form_options(config, pipeline.method_names)
     _register_catalog_routes(app, pipeline, library, options)
     _register_image_routes(app, pipeline, config, options)
-    _register_mosaic_routes(app, pipeline, library, config, options)
-    _register_library_routes(app, pipeline, library, config)
+    _register_mosaic_routes(app, pipeline, library, mosaics, config, options)
+    _register_library_routes(app, pipeline, library, mosaics)
     _register_bricklink_routes(
-        app, config, None if price_factory is None else price_factory(config)
+        app, config, mosaics, None if price_factory is None else price_factory(config)
     )
 
     @app.get("/openapi.yaml", include_in_schema=False)
@@ -496,6 +527,7 @@ def _register_mosaic_routes(
     app: FastAPI,
     pipeline: MosaicPipeline,
     library: Library,
+    mosaics: MosaicRepository,
     config: AppConfig,
     options: dict[str, FieldOption],
 ) -> None:
@@ -645,10 +677,14 @@ def _register_mosaic_routes(
         resolved = library.resolve(values, preset=preset, palette=palette)
         overrides = _with_required_outputs(parse_overrides(resolved.inputs), config)
         title = run_title(resolved.inputs, safe_name(Path(bild.filename or "mosaik").stem))
-        result = pipeline.run(data, overrides, title=title, inputs=resolved.inputs)
+        with mosaics.new_output_dir() as output_dir:
+            overrides = replace(overrides, output_dir=output_dir)
+            result = pipeline.run(data, overrides, title=title, inputs=resolved.inputs)
+            mosaics.store(result.target_dir)
+            created = _created(request, result)
         if resolved.preset is not None:
             library.presets.record_use(resolved.preset.id)
-        return _created(request, result)
+        return created
 
     @app.get(
         "/mosaike/{mosaic_id}",
@@ -657,7 +693,7 @@ def _register_mosaic_routes(
         tags=[TAG_MOSAICS],
     )
     def get_mosaic(mosaic_id: str) -> ResultModel:
-        return _result(_mosaic_dir(config.output_dir, mosaic_id))
+        return ResultModel.model_validate_json(mosaics.read_bytes(mosaic_id, RESULT_FILE))
 
     @app.get(
         "/mosaike/{mosaic_id}/dateien/{file_name}",
@@ -669,12 +705,20 @@ def _register_mosaic_routes(
             **_errors(404),
         },
     )
-    def download_file(mosaic_id: str, file_name: str) -> FileResponse:
-        directory = _mosaic_dir(config.output_dir, mosaic_id)
+    def download_file(mosaic_id: str, file_name: str) -> Response:
+        result = ResultModel.model_validate_json(mosaics.read_bytes(mosaic_id, RESULT_FILE))
         # Nur Namen aus ergebnis.json; der Pfad wird nie direkt aus der URL gebaut
-        if file_name not in _result(directory).dateien:
+        if file_name not in result.dateien:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Datei „{file_name}“ gibt es nicht.")
-        return FileResponse(directory / file_name, filename=file_name)
+        stored = mosaics.open_file(mosaic_id, file_name)
+        if stored.path is not None:
+            return FileResponse(stored.path, filename=file_name)
+        # Aus S3 gestreamt: dieselben Header wie FileResponse
+        media_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        headers = {"Content-Disposition": f'attachment; filename="{file_name}"'}
+        if stored.size is not None:
+            headers["Content-Length"] = str(stored.size)
+        return StreamingResponse(iter(stored.chunks), media_type=media_type, headers=headers)
 
     @app.get(
         "/mosaike/{mosaic_id}/raster",
@@ -685,12 +729,10 @@ def _register_mosaic_routes(
         tags=[TAG_MOSAICS],
     )
     def get_raster(mosaic_id: str) -> RasterModel:
-        path = _mosaic_dir(config.output_dir, mosaic_id) / RASTER_FILE
-        if not path.is_file():
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, "Für dieses Mosaik gibt es kein Raster (raster_json)."
-            )
-        return RasterModel.model_validate_json(path.read_bytes())
+        data = _optional_file(
+            mosaics, mosaic_id, RASTER_FILE, "Für dieses Mosaik gibt es kein Raster (raster_json)."
+        )
+        return RasterModel.model_validate_json(data)
 
     @app.post(
         "/mosaike/{mosaic_id}/bearbeiten",
@@ -707,16 +749,21 @@ def _register_mosaic_routes(
     def edit_mosaic(
         request: Request, mosaic_id: str, aenderungen: EditRequestModel
     ) -> MosaicCreatedModel:
-        directory = _mosaic_dir(config.output_dir, mosaic_id)
+        if not mosaics.exists(mosaic_id):
+            raise NotFoundError(f"Mosaik „{mosaic_id}“ gibt es nicht.")
         edits = _edits(aenderungen)
         if not edits:
             raise ConfigError("Bitte mindestens eine Änderung angeben.")
-        result = pipeline.edit(directory, edits, required_outputs=REQUIRED_OUTPUTS)
-        return _created(request, result)
+        with mosaics.workspace(mosaic_id) as directory, mosaics.new_output_dir() as output_dir:
+            result = pipeline.edit(
+                directory, edits, required_outputs=REQUIRED_OUTPUTS, output_dir=output_dir
+            )
+            mosaics.store(result.target_dir)
+            return _created(request, result)
 
 
 def _register_library_routes(
-    app: FastAPI, pipeline: MosaicPipeline, library: Library, config: AppConfig
+    app: FastAPI, pipeline: MosaicPipeline, library: Library, mosaics: MosaicRepository
 ) -> None:
     """``/paletten`` und ``/presets`` sowie ``POST /mosaike/{id}/preset``."""
 
@@ -863,8 +910,8 @@ def _register_library_routes(
         tags=[TAG_PRESETS],
     )
     def preset_from_mosaic(mosaic_id: str, preset: PresetFromMosaicModel) -> PresetModel:
-        directory = _mosaic_dir(config.output_dir, mosaic_id)
-        values = form_values(pipeline.inputs_of(directory))
+        with mosaics.workspace(mosaic_id) as directory:
+            values = form_values(pipeline.inputs_of(directory))
         values.pop("titel", None)
         created = library.presets.create(
             preset.name,
@@ -907,7 +954,7 @@ def _edits(request: EditRequestModel) -> list[GridEdit]:
 
 def _created(request: Request, result: MosaicResult) -> MosaicCreatedModel:
     """Antwort mit Statistik und absoluten Download-URLs aus ``ergebnis.json``."""
-    content = _result(result.target_dir)
+    content = ResultModel.model_validate_json((result.target_dir / RESULT_FILE).read_bytes())
     base_url = str(request.base_url).rstrip("/")
     urls = {name: f"{base_url}/mosaike/{result.id}/dateien/{name}" for name in content.dateien}
     return MosaicCreatedModel(
@@ -916,7 +963,7 @@ def _created(request: Request, result: MosaicResult) -> MosaicCreatedModel:
 
 
 def _register_bricklink_routes(
-    app: FastAPI, config: AppConfig, prices: PriceService | None
+    app: FastAPI, config: AppConfig, mosaics: MosaicRepository, prices: PriceService | None
 ) -> None:
     """``/mosaike/{id}/preise`` (nur mit Preisdienst) und ``/mosaike/{id}/bricklink``."""
 
@@ -940,9 +987,9 @@ def _register_bricklink_routes(
                 bool, Query(description="Alle Preise neu abfragen, auch aktuelle")
             ] = False,
         ) -> PriceEstimateModel:
-            directory = _mosaic_dir(config.output_dir, mosaic_id)
-            prices.estimate(directory, offline=offline, force=erzwingen)
-            return _prices(directory)
+            with mosaics.workspace(mosaic_id, write=True) as directory:
+                prices.estimate(directory, offline=offline, force=erzwingen)
+                return _prices(directory)
 
     @app.get(
         "/mosaike/{mosaic_id}/preise",
@@ -951,12 +998,10 @@ def _register_bricklink_routes(
         tags=[TAG_BRICKLINK],
     )
     def get_prices(mosaic_id: str) -> PriceEstimateModel:
-        directory = _mosaic_dir(config.output_dir, mosaic_id)
-        if not (directory / PRICES_FILE).is_file():
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, "Für dieses Mosaik gibt es noch keine Preise."
-            )
-        return _prices(directory)
+        data = _optional_file(
+            mosaics, mosaic_id, PRICES_FILE, "Für dieses Mosaik gibt es noch keine Preise."
+        )
+        return PriceEstimateModel.model_validate_json(data)
 
     @app.get(
         "/mosaike/{mosaic_id}/bricklink",
@@ -967,14 +1012,14 @@ def _register_bricklink_routes(
         tags=[TAG_BRICKLINK],
     )
     def get_bricklink_export(mosaic_id: str) -> BrickLinkExportModel:
-        directory = _mosaic_dir(config.output_dir, mosaic_id)
-        items = read_order_items(directory)
-        path = directory / BRICKLINK_FILE_NAME
-        # Die Datei enthält nach einer Preisschätzung auch Höchstpreise
-        if path.is_file():
-            xml = path.read_text(encoding="utf-8")
-        else:
-            xml, _ = bricklink_xml(items, condition=config.pricing.condition)
+        with mosaics.workspace(mosaic_id) as directory:
+            items = read_order_items(directory)
+            path = directory / BRICKLINK_FILE_NAME
+            # Die Datei enthält nach einer Preisschätzung auch Höchstpreise
+            if path.is_file():
+                xml = path.read_text(encoding="utf-8")
+            else:
+                xml, _ = bricklink_xml(items, condition=config.pricing.condition)
         quantities = [
             int(item.findtext("MINQTY") or 0) for item in ElementTree.fromstring(xml).iter("ITEM")
         ]
@@ -1003,14 +1048,13 @@ def _read_limited(upload: UploadFile, max_bytes: int) -> bytes:
     return data
 
 
-def _mosaic_dir(output_dir: Path, mosaic_id: str) -> Path:
-    """Ordner eines Mosaiks; unbekannte oder unsichere IDs ergeben 404."""
-    directory = output_dir / mosaic_id
-    if not VALID_ID.match(mosaic_id) or not (directory / RESULT_FILE).is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Mosaik „{mosaic_id}“ gibt es nicht.")
-    return directory
-
-
-def _result(directory: Path) -> ResultModel:
-    """``ergebnis.json`` eines Mosaiks; seine Dateiliste ist die einzige Quelle für Downloads."""
-    return ResultModel.model_validate_json((directory / RESULT_FILE).read_bytes())
+def _optional_file(
+    mosaics: MosaicRepository, mosaic_id: str, file_name: str, missing: str
+) -> bytes:
+    """Datei, die nicht jedes Mosaik hat: unbekanntes Mosaik und fehlende Datei → 404."""
+    if not mosaics.exists(mosaic_id):
+        raise NotFoundError(f"Mosaik „{mosaic_id}“ gibt es nicht.")
+    try:
+        return mosaics.read_bytes(mosaic_id, file_name)
+    except NotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, missing) from None

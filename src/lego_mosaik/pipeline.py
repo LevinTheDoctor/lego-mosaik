@@ -205,6 +205,8 @@ class MosaicPipeline:
         component_factory: Baut aus der Laufkonfiguration die konkreten Bausteine.
         method_names: Registrierte Namen je Art (für ``verfahren``), z. B. ``{"dithering": …}``.
         now: Uhr für den Ordnernamen (in Tests austauschbar).
+        id_suffix: Liefert einen Zusatz für jeden Ordnernamen, z. B. ein Zufallskürzel.
+            Nötig, wenn mehrere Prozesse Mosaike anlegen (Cloud); lokal ``None``.
     """
 
     def __init__(
@@ -216,6 +218,7 @@ class MosaicPipeline:
         component_factory: Callable[[AppConfig], PipelineComponents],
         method_names: Mapping[str, Sequence[str]],
         now: Callable[[], datetime] = datetime.now,
+        id_suffix: Callable[[], str] | None = None,
     ) -> None:
         self.config = config
         self._source = catalog_source
@@ -223,6 +226,7 @@ class MosaicPipeline:
         self._component_factory = component_factory
         self.method_names = {kind: tuple(names) for kind, names in method_names.items()}
         self._now = now
+        self._id_suffix = id_suffix
 
     # --- Katalog ---------------------------------------------------------------
 
@@ -379,6 +383,7 @@ class MosaicPipeline:
         *,
         required_outputs: Sequence[str] = (),
         on_step: StepCallback | None = None,
+        output_dir: Path | None = None,
     ) -> MosaicResult:
         """Rechnet ein gespeichertes Mosaik mit weiteren Änderungen neu (neuer Ordner, neue ID).
 
@@ -390,6 +395,7 @@ class MosaicPipeline:
             edits: Neue Änderungen.
             required_outputs: Ausgaben, die auf jeden Fall entstehen (z. B. für die API).
             on_step: Fortschritt wie bei ``run``.
+            output_dir: Hier entsteht das neue Mosaik (Standard: neben dem alten).
 
         Raises:
             NotFoundError: Wenn Originalbild oder Eingaben fehlen.
@@ -400,7 +406,7 @@ class MosaicPipeline:
         if not source.is_file():
             raise NotFoundError(f"Das Originalbild von „{directory.name}“ fehlt.")
         raw = _saved_input(saved)
-        overrides = replace(parse_overrides(raw), output_dir=directory.parent)
+        overrides = replace(parse_overrides(raw), output_dir=output_dir or directory.parent)
         if required_outputs:
             outputs = overrides.outputs or self.config.outputs
             missing = tuple(name for name in required_outputs if name not in outputs)
@@ -528,6 +534,8 @@ class MosaicPipeline:
     def _create_target_dir(self, output_dir: Path, title: str) -> Path:
         """Legt ``<ausgabe>/<zeitstempel>_<titel>`` an; bei Kollision mit Zähler."""
         base = f"{self._now().strftime(TIMESTAMP_FORMAT)}_{safe_name(title)}"
+        if self._id_suffix is not None:
+            base = f"{base}_{self._id_suffix()}"
         candidate, counter = output_dir / base, 2
         while candidate.exists():
             candidate, counter = output_dir / f"{base}_{counter}", counter + 1

@@ -1,6 +1,6 @@
 """Schnittstelle und Datenklassen der Preisabfrage."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -34,4 +34,20 @@ class PriceSource(Protocol):
         Raises:
             PriceSourceError: Bei Netzwerk- oder Anmeldefehlern.
         """
+        ...
+
+
+class PriceCacheProtocol(Protocol):
+    """Gespeicherte Preise (lokal ``pricing/cache.py``, in der Cloud PostgreSQL)."""
+
+    def get(self, key: PriceKey) -> PriceGuide | None:
+        """Gespeicherter Preis oder ``None``; auch veraltete Preise kommen zurück."""
+        ...
+
+    def is_fresh(self, guide: PriceGuide) -> bool:
+        """True, wenn der Preis noch nicht veraltet ist."""
+        ...
+
+    def update(self, guides: Mapping[PriceKey, PriceGuide]) -> None:
+        """Übernimmt neue Preise."""
         ...

@@ -15,6 +15,7 @@ from lego_mosaik.domain.errors import ConfigError
 from lego_mosaik.domain.library import Preset, SettingValue
 from lego_mosaik.storage.palettes import PaletteStore
 from lego_mosaik.storage.presets import PresetStore
+from lego_mosaik.storage.protocol import PaletteRepository, PresetRepository
 
 PALETTE_FIELD = "palette"  # Name einer eigenen Palette (statt farb_ids)
 COLOR_IDS_FIELD = "farb_ids"
@@ -43,11 +44,11 @@ class Library:
     """Eigene Paletten und Presets für CLI, interaktiven Modus und API.
 
     Args:
-        palettes: Speicher der Paletten.
+        palettes: Speicher der Paletten (lokal JSON, in der Cloud PostgreSQL).
         presets: Speicher der Presets.
     """
 
-    def __init__(self, palettes: PaletteStore, presets: PresetStore) -> None:
+    def __init__(self, palettes: PaletteRepository, presets: PresetRepository) -> None:
         self.palettes = palettes
         self.presets = presets
 
