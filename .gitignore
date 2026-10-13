@@ -21,3 +21,6 @@ ausgabe/
 
 # macOS-Ordnerinfos
 .DS_Store
+
+# Lokale Umgebungsvariablen (Cloud-Variante)
+.env

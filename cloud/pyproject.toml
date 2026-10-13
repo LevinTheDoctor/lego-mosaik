@@ -1,0 +1,62 @@
+[project]
+name = "lego-mosaik-cloud"
+version = "0.1.0"
+description = "Cloud-Variante des LEGO-Mosaik-Service: PostgreSQL, S3 (Garage), Observability"
+readme = "README.md"
+authors = [
+    { name = "Levin Rüßmann", email = "Levin13c@gmail.com" }
+]
+requires-python = ">=3.15"
+dependencies = [
+    "alembic>=1.20.0",
+    "boto3>=1.43.112",
+    "lego-mosaik",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
+    "opentelemetry-instrumentation-botocore>=0.66b1",
+    "opentelemetry-instrumentation-fastapi>=0.66b1",
+    "opentelemetry-instrumentation-httpx>=0.66b1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.66b1",
+    "opentelemetry-sdk>=1.45.1",
+    "prometheus-client>=0.26.0",
+    "psycopg[binary,pool]>=3.3.6",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy>=2",
+]
+
+[project.scripts]
+lego-mosaik-cloud = "lego_mosaik_cloud.cli:run"
+
+[tool.uv.sources]
+lego-mosaik = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "boto3-stubs[s3]>=1.43.112",
+    "moto>=5.2.4",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+    "testcontainers[postgres]>=4.15.0",
+]
+
+[tool.ruff]
+extend = "../pyproject.toml"
+
+[tool.mypy]
+python_version = "3.15"
+strict = true
+files = ["src"]
+untyped_calls_exclude = ["skimage"]
+
+[[tool.mypy.overrides]]
+# boto3 und die OTel-Instrumentierungen bringen (teilweise) keine Typen mit
+module = ["boto3", "boto3.*", "botocore.*", "opentelemetry.instrumentation.*", "moto", "testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: braucht Docker (PostgreSQL per testcontainers)"]
