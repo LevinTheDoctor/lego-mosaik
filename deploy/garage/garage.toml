@@ -1,0 +1,17 @@
+# Garage für die lokale Cloud-Entwicklung (compose.yaml): ein Knoten, keine Replikation.
+# rpc_secret und admin_token kommen aus GARAGE_RPC_SECRET und GARAGE_ADMIN_TOKEN.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[admin]
+api_bind_addr = "[::]:3903"
