@@ -479,6 +479,19 @@ journalctl --user -u lego-mosaik-update.service           # Logs
 
 `Persistent=true` holt einen verpassten Lauf nach, z. B. wenn der Rechner aus war. Unter macOS erfüllt ein `launchd`-Agent (`~/Library/LaunchAgents/`) denselben Zweck.
 
+## Cloud-Variante
+
+Neben der lokalen App gibt es eine Cloud-Variante im selben Repository (uv-Workspace-Paket `cloud/`, Befehl `lego-mosaik-cloud`). Sie nutzt dieselbe Pipeline und dieselbe HTTP-API, speichert aber Bilder und alle erzeugten Dateien in Garage (S3) und Katalog, Paletten, Presets, Preis-Cache und Mosaik-Metadaten in PostgreSQL. Dazu kommen Actuator-Endpunkte wie bei Spring Boot (`/actuator/health`, `/actuator/prometheus`, …), JSON-Logs und OpenTelemetry-Tracing.
+
+```bash
+uv sync --all-packages                          # Kern + Cloud-Paket
+docker compose up --build -d                    # PostgreSQL, Garage und App lokal
+docker compose run --rm app katalog-import      # Teilekatalog laden
+helm install lego deploy/helm/lego-mosaik       # Kubernetes (mit PostgreSQL und Garage)
+```
+
+Details zu Aufbau, Einstellungen, Metriken und Helm-Chart: [`docs/cloud.md`](docs/cloud.md). Die lokale App bleibt davon unberührt.
+
 ## Architektur
 
 ```text
@@ -555,6 +568,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy src
 uv run python scripts/ldraw_achsen_pruefen.py  # Teileausrichtung gegen LDraw prüfen
 uv run python scripts/openapi_exportieren.py   # openapi.yaml nach API-Änderungen neu schreiben
+cd cloud && uv run pytest && uv run mypy       # Cloud-Variante (braucht Docker für PostgreSQL)
 ```
 
 Die Tests in `tests/test_studio_reference.py` gleichen BrickLink-Nummern, Teileachsen und die Umrisse der Formteile (in allen vier Drehungen) mit einer lokalen Studio-Installation ab. Ohne Studio werden sie übersprungen.
