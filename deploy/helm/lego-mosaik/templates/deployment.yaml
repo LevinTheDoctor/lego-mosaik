@@ -51,6 +51,26 @@ spec:
       # Mosaike können Minuten dauern: laufende Anfragen zu Ende rechnen lassen
       terminationGracePeriodSeconds: 120
       initContainers:
+        {{- if .Values.persistence.fixOwnership }}
+        - name: volume-besitzer
+          image: {{ include "lego-mosaik.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- $uid := .Values.podSecurityContext.runAsUser | default 10001 }}
+          {{- $gid := .Values.podSecurityContext.runAsGroup | default $uid }}
+          command: ["chown", "{{ $uid }}:{{ $gid }}", {{ .Values.persistence.mountPath | quote }}]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - name: mosaike
+              mountPath: {{ .Values.persistence.mountPath }}
+        {{- end }}
         {{- include "lego-mosaik.commandContainer" (dict "root" . "name" "migrieren" "args" (list "migrieren" "--warten" "300")) | nindent 8 }}
       containers:
         - name: api

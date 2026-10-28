@@ -136,6 +136,11 @@ persistence:
   accessModes: [ReadWriteOnce]
   mountPath: /var/lib/lego-mosaik
   annotations: {}
+  # Init-Container, der dem Wurzelordner des Volumes einmalig den App-Nutzer (runAsUser)
+  # gibt. Nötig bei CSI-Treibern, die fsGroup ignorieren (fsGroupPolicy
+  # ReadWriteOnceWithFSType ohne fsType in der StorageClass, z. B. Synology CSI).
+  # Läuft als root, aber nur mit CAP_CHOWN.
+  fixOwnership: false
   # Felder wie beim iSCSI-Volume von Kubernetes (in-tree), werden 1:1 übernommen.
   # Auf jedem Knoten, der den Pod bekommen kann, muss open-iscsi (iscsiadm) laufen.
   iscsi: {}

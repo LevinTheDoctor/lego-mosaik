@@ -55,7 +55,7 @@ jobs:
         run: |
           set -e
           for args in "" \
-            "--set persistence.storageClass=synology-iscsi-storage" \
+            "--set persistence.storageClass=synology-iscsi-storage --set persistence.fixOwnership=true" \
             "--set persistence.iscsi.targetPortal=10.0.0.1:3260 --set persistence.iscsi.iqn=iqn.x:y --set persistence.iscsi.lun=0" \
             "--set postgresql.enabled=false --set externalDatabase.url=postgresql+psycopg://u:p@db/x --set ingress.enabled=true"; do
             helm template ci deploy/helm/lego-mosaik $args > /dev/null
