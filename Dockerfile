@@ -10,6 +10,11 @@ ARG PYTHON_VERSION=3.15
 # --- Build ------------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim-trixie AS build
 
+# Compiler für Pakete ohne Wheels für Python 3.15 (z. B. scikit-image); nur in dieser Stufe
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
