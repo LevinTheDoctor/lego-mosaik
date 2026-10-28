@@ -2,14 +2,13 @@
 
 Im Helm-Chart: ``migrieren`` im initContainer, ``katalog-import`` als Job/CronJob,
 ``server`` im Deployment. ``uebernehmen`` kopiert lokale Daten (Paletten, Presets,
-Mosaike aus ``ausgabe/``) einmalig in PostgreSQL und S3. ``garage-init`` richtet Garage ein.
+Mosaike aus ``ausgabe/``) einmalig in PostgreSQL und auf das Mosaik-Volume.
 """
 
 import logging
 from pathlib import Path
 from typing import Annotated
 
-import httpx
 import typer
 import uvicorn
 from lego_mosaik.outputs.result_json import FILE_NAME as RESULT_FILE
@@ -18,7 +17,6 @@ from lego_mosaik.storage.json_file import JsonFile
 from lego_mosaik_cloud.app import CloudServices, build_cloud_app, build_services
 from lego_mosaik_cloud.db import schema
 from lego_mosaik_cloud.db.engine import migrate, wait_for_database
-from lego_mosaik_cloud.garage_init import GarageAdmin, GarageSetup, run_setup
 from lego_mosaik_cloud.observability.logging import configure_logging
 from lego_mosaik_cloud.settings import CloudSettings
 from lego_mosaik_cloud.storage.tables import PostgresItemTable
@@ -26,7 +24,7 @@ from lego_mosaik_cloud.storage.tables import PostgresItemTable
 logger = logging.getLogger(__name__)
 
 cli = typer.Typer(
-    help="LEGO-Mosaik-Service in der Cloud (PostgreSQL, S3/Garage, Actuator).",
+    help="LEGO-Mosaik-Service in der Cloud (PostgreSQL, Mosaik-Volume, Actuator).",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -122,33 +120,6 @@ def uebernehmen(
         services.mosaics.store(directory)
         count += 1
     logger.info("Mosaike: %d übernommen.", count)
-
-
-@cli.command("garage-init")
-def garage_init(
-    admin_url: Annotated[
-        str, typer.Option(envvar="GARAGE_ADMIN_URL", help="Admin-API, z. B. http://garage:3903.")
-    ],
-    admin_token: Annotated[str, typer.Option(envvar="GARAGE_ADMIN_TOKEN", help="Admin-Token.")],
-    knoten: Annotated[int, typer.Option(help="So viele Knoten abwarten.")] = 1,
-    zone: Annotated[str, typer.Option(help="Zone neuer Knoten.")] = "dc1",
-    kapazitaet: Annotated[int, typer.Option(help="Speicher je Knoten in Bytes.")] = 10 * 1000**3,
-    warten: Annotated[float, typer.Option(help="Sekunden auf Garage warten.")] = 300,
-) -> None:
-    """Richtet Garage ein: Layout, S3-Key und Bucket aus LEGO_MOSAIK_S3_* (idempotent)."""
-    settings = CloudSettings()
-    configure_logging(settings.log_level, settings.log_format)
-    setup = GarageSetup(
-        nodes=knoten,
-        zone=zone,
-        capacity_bytes=kapazitaet,
-        bucket=settings.s3_bucket,
-        access_key_id=settings.s3_access_key.get_secret_value(),
-        secret_access_key=settings.s3_secret_key.get_secret_value(),
-    )
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    with httpx.Client(base_url=admin_url, headers=headers, timeout=30) as client:
-        run_setup(GarageAdmin(client), setup, warten)
 
 
 def run() -> None:

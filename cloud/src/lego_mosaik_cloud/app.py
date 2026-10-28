@@ -1,16 +1,17 @@
-"""Composition Root der Cloud-Variante: PostgreSQL, S3 und Observability verdrahten.
+"""Composition Root der Cloud-Variante: PostgreSQL, Mosaik-Volume und Observability verdrahten.
 
 Die API selbst kommt unverändert aus dem Kern (``lego_mosaik.interfaces.api.create_app``);
 hier werden nur andere Speicher eingesetzt und Actuator, Metriken und Tracing ergänzt.
 """
 
+import os
 import secrets
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 
-import boto3
-from botocore.config import Config as BotoConfig
 from fastapi import FastAPI
 from lego_mosaik.config import AppConfig
 from lego_mosaik.interfaces.api import ApiBackend, create_app
@@ -39,30 +40,11 @@ from lego_mosaik_cloud.observability.actuator import (
 from lego_mosaik_cloud.observability.metrics import HttpMetricsMiddleware, Metrics
 from lego_mosaik_cloud.observability.tracing import configure_tracing
 from lego_mosaik_cloud.settings import CloudSettings
-from lego_mosaik_cloud.storage.mosaics import S3Client, S3MosaicRepository
+from lego_mosaik_cloud.storage.mosaics import VolumeMosaicRepository
 from lego_mosaik_cloud.storage.prices import PostgresPriceCache
 from lego_mosaik_cloud.storage.tables import PostgresItemTable
 
 ID_SUFFIX_BYTES = 3  # 6 Hex-Zeichen: Pods erzeugen nie dieselbe ID
-
-
-def build_s3_client(settings: CloudSettings) -> S3Client:
-    """S3-Client für Garage: Path-Style-Adressen und Region ``garage``."""
-    client: S3Client = boto3.client(
-        "s3",
-        endpoint_url=settings.s3_endpoint,
-        region_name=settings.s3_region,
-        aws_access_key_id=settings.s3_access_key.get_secret_value(),
-        aws_secret_access_key=settings.s3_secret_key.get_secret_value(),
-        config=BotoConfig(
-            s3={"addressing_style": "path"},
-            retries={"mode": "standard", "max_attempts": 3},
-            # Garage prüft keine CRC-Prüfsummen neuerer SDKs; nur senden, wenn nötig
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        ),
-    )
-    return client
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +54,10 @@ class CloudServices:
     settings: CloudSettings
     config: AppConfig
     engine: Engine
-    s3: S3Client
     catalog: PostgresCatalogSource
     importer: PostgresCatalogImporter
     library: Library
-    mosaics: S3MosaicRepository
+    mosaics: VolumeMosaicRepository
     metrics: Metrics
 
     def pipeline(self, config: AppConfig) -> MosaicPipeline:
@@ -101,30 +82,27 @@ def build_services(
     settings: CloudSettings,
     *,
     engine: Engine | None = None,
-    s3: S3Client | None = None,
     registry: CollectorRegistry = REGISTRY,
     base: AppConfig = CONFIG,
 ) -> CloudServices:
     """Baut alle Bausteine aus den Einstellungen.
 
-    ``engine``, ``s3``, ``registry`` und ``base`` (fachliche Konfiguration) sind für Tests
+    ``engine``, ``registry`` und ``base`` (fachliche Konfiguration) sind für Tests
     austauschbar.
     """
     engine = engine or build_engine(settings)
-    s3 = s3 or build_s3_client(settings)
     config = cloud_app_config(settings, base)
     return CloudServices(
         settings=settings,
         config=config,
         engine=engine,
-        s3=s3,
         catalog=PostgresCatalogSource(engine, settings.catalog_refresh_seconds),
         importer=PostgresCatalogImporter(engine, config.source),
         library=Library(
             PaletteStore(PostgresItemTable(engine, schema.palettes)),
             PresetStore(PostgresItemTable(engine, schema.presets)),
         ),
-        mosaics=S3MosaicRepository(engine, s3, settings.s3_bucket, settings.s3_prefix),
+        mosaics=VolumeMosaicRepository(engine, settings.mosaic_dir),
         metrics=Metrics(registry),
     )
 
@@ -144,10 +122,10 @@ def build_cloud_app(services: CloudServices) -> FastAPI:
 def _health_group(services: CloudServices) -> HealthGroup:
     indicators: dict[str, HealthIndicator] = {
         "db": partial(_database_health, services.engine),
-        "s3": partial(_s3_health, services.s3, services.settings.s3_bucket),
+        "speicher": partial(_storage_health, services.mosaics.root),
         "katalog": partial(_catalog_health, services),
     }
-    return HealthGroup(indicators, readiness=frozenset({"db", "s3"}))
+    return HealthGroup(indicators, readiness=frozenset({"db", "speicher"}))
 
 
 def _database_health(engine: Engine) -> Health:
@@ -156,9 +134,12 @@ def _database_health(engine: Engine) -> Health:
     return Health(Status.UP, {"datenbank": "PostgreSQL", "version": server})
 
 
-def _s3_health(s3: S3Client, bucket: str) -> Health:
-    s3.head_bucket(Bucket=bucket)
-    return Health(Status.UP, {"bucket": bucket})
+def _storage_health(root: Path) -> Health:
+    """``DOWN``, wenn das Volume fehlt oder nicht beschreibbar ist (Platz nur als Detail)."""
+    if not root.is_dir() or not os.access(root, os.W_OK):
+        return Health(Status.DOWN, {"pfad": str(root), "fehler": "nicht beschreibbar"})
+    usage = shutil.disk_usage(root)
+    return Health(Status.UP, {"pfad": str(root), "frei": usage.free, "gesamt": usage.total})
 
 
 def _catalog_health(services: CloudServices) -> Health:

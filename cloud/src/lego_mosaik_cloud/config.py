@@ -15,7 +15,7 @@ USER_AGENT = "lego-mosaik-cloud/0.1"
 def cloud_app_config(settings: CloudSettings, base: AppConfig = CONFIG) -> AppConfig:
     """Übernimmt die lokale Konfiguration und ersetzt nur, was in der Cloud anders ist.
 
-    Mosaike entstehen in Temp-Ordnern und landen danach in S3; die Rebrickable-Dumps
+    Mosaike entstehen in Temp-Ordnern auf dem Volume (``mosaic_dir``); die Rebrickable-Dumps
     lädt nur der Katalog-Import (ebenfalls in einen Temp-Ordner).
     """
     work_dir = Path(tempfile.gettempdir()) / "lego-mosaik"

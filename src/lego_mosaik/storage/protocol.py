@@ -2,7 +2,7 @@
 
 Lokal liegen Paletten und Presets in JSON-Dateien und jedes Mosaik in einem Ordner unter
 ``ausgabe/``. Die Cloud-Variante (Paket ``lego_mosaik_cloud``) erfüllt dieselben Protocols
-mit PostgreSQL und S3; API und Bibliothek kennen nur diese Schnittstellen.
+mit PostgreSQL und einem Volume; API und Bibliothek kennen nur diese Schnittstellen.
 """
 
 from collections.abc import Iterable, Mapping, MutableSequence, Sequence

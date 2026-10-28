@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import BUCKET
 from fastapi.testclient import TestClient
 
 from lego_mosaik_cloud.app import CloudServices, build_cloud_app
@@ -27,12 +26,15 @@ def _create(client: TestClient, image_file: Path) -> dict[str, Any]:
     return body
 
 
-def test_create_download_and_edit(client: TestClient, image_file: Path, s3: Any) -> None:
+def test_create_download_and_edit(
+    client: TestClient, imported: CloudServices, image_file: Path
+) -> None:
     created = _create(client, image_file)
     mosaic_id = created["id"]
-    keys = {o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET)["Contents"]}
-    assert f"mosaike/{mosaic_id}/ergebnis.json" in keys
-    assert any(key.startswith(f"mosaike/{mosaic_id}/original.") for key in keys)
+    directory = imported.settings.mosaic_dir / mosaic_id
+    assert (directory / "ergebnis.json").is_file()
+    assert any(path.name.startswith("original.") for path in directory.iterdir())
+    assert not any((imported.settings.mosaic_dir / ".tmp").iterdir())  # nichts liegen geblieben
 
     preview = client.get(f"/mosaike/{mosaic_id}/dateien/vorschau.png")
     assert preview.status_code == 200 and preview.headers["content-type"] == "image/png"
@@ -88,21 +90,21 @@ def test_actuator_health_and_probes(client: TestClient) -> None:
     components = health.json()["components"]
     assert {name: c["status"] for name, c in components.items()} == {
         "db": "UP",
-        "s3": "UP",
+        "speicher": "UP",
         "katalog": "UP",
     }
     assert client.get("/actuator/health/liveness").json() == {"status": "UP"}
     readiness = client.get("/actuator/health/readiness").json()
-    assert set(readiness["components"]) == {"db", "s3"}
+    assert set(readiness["components"]) == {"db", "speicher"}
     assert client.get("/actuator/health/db").json()["status"] == "UP"
     assert client.get("/actuator/health/fehlt").status_code == 404
 
 
-def test_readiness_is_down_without_bucket(client: TestClient, s3: Any) -> None:
-    s3.delete_bucket(Bucket=BUCKET)
+def test_readiness_is_down_without_volume(client: TestClient, imported: CloudServices) -> None:
+    imported.settings.mosaic_dir.rmdir()  # Volume nicht eingehängt
     response = client.get("/actuator/health/readiness")
     assert response.status_code == 503
-    assert response.json()["components"]["s3"]["status"] == "DOWN"
+    assert response.json()["components"]["speicher"]["status"] == "DOWN"
 
 
 def test_actuator_info_metrics_and_prometheus(client: TestClient, image_file: Path) -> None:

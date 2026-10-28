@@ -2,7 +2,7 @@
 
 Aktiv, sobald ``OTEL_EXPORTER_OTLP_ENDPOINT`` gesetzt ist (z. B. auf einen OTel Collector,
 Grafana Tempo oder Jaeger). Weitere Standard-Variablen wie ``OTEL_TRACES_SAMPLER`` wirken
-direkt. Instrumentiert werden HTTP-Server, Datenbank, S3 und ausgehende HTTP-Aufrufe.
+direkt. Instrumentiert werden HTTP-Server, Datenbank und ausgehende HTTP-Aufrufe.
 """
 
 import logging
@@ -35,7 +35,6 @@ def configure_tracing(app: FastAPI, engine: Engine, service_name: str) -> bool:
     # Importe erst hier: ohne Tracing bleiben Start und Speicherbedarf kleiner
     from opentelemetry import trace
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
@@ -51,7 +50,6 @@ def configure_tracing(app: FastAPI, engine: Engine, service_name: str) -> bool:
     trace.set_tracer_provider(provider)
     FastAPIInstrumentor.instrument_app(app, excluded_urls=EXCLUDED_URLS)
     SQLAlchemyInstrumentor().instrument(engine=engine)
-    BotocoreInstrumentor().instrument()  # type: ignore[no-untyped-call]
     HTTPXClientInstrumentor().instrument()
     logger.info("Tracing an (OTLP).")
     return True

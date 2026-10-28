@@ -41,22 +41,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-postgresql" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "lego-mosaik.garage.fullname" -}}
-{{- printf "%s-garage" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{/* PVC der Mosaike: vorhandener (persistence.existingClaim) oder vom Chart angelegt */}}
+{{- define "lego-mosaik.mosaicClaim" -}}
+{{- .Values.persistence.existingClaim | default (printf "%s-mosaike" (include "lego-mosaik.fullname" .)) -}}
 {{- end -}}
 
-{{- define "lego-mosaik.s3SecretName" -}}
-{{- .Values.s3.existingSecret | default (printf "%s-s3" (include "lego-mosaik.fullname" .)) -}}
-{{- end -}}
-
-{{- define "lego-mosaik.s3Endpoint" -}}
-{{- if .Values.s3.endpoint -}}
-{{- .Values.s3.endpoint -}}
-{{- else if .Values.garage.enabled -}}
-{{- printf "http://%s:3900" (include "lego-mosaik.garage.fullname" .) -}}
-{{- else -}}
-{{- fail "s3.endpoint fehlt (oder garage.enabled=true setzen)" -}}
-{{- end -}}
+{{/* Ein RWO-Volume hängt nur an einem Knoten: kein Rolling Update über Knoten hinweg */}}
+{{- define "lego-mosaik.singleNodeVolume" -}}
+{{- if has "ReadWriteOnce" .Values.persistence.accessModes }}true{{ end -}}
 {{- end -}}
 
 {{/* Umgebung für App, Migration und Jobs */}}
@@ -84,16 +76,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else }}
 {{- fail "Datenbank fehlt: postgresql.enabled=true oder externalDatabase.url/existingSecret setzen" }}
 {{- end }}
-- name: LEGO_MOSAIK_S3_ACCESS_KEY
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "lego-mosaik.s3SecretName" . }}
-      key: accessKeyId
-- name: LEGO_MOSAIK_S3_SECRET_KEY
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "lego-mosaik.s3SecretName" . }}
-      key: secretAccessKey
 {{- if .Values.config.otlpEndpoint }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.config.otlpEndpoint | quote }}
@@ -175,4 +157,21 @@ containers:
   {{- include "lego-mosaik.commandContainer" (dict "root" . "name" "katalog-import" "args" (list "katalog-import" "--warten" "300") "resources" .Values.catalogImport.resources) | nindent 2 }}
 volumes:
   {{- include "lego-mosaik.volumes" . | nindent 2 }}
+{{- with (include "lego-mosaik.scheduling" . | trim) }}{{ . | nindent 0 }}{{- end }}
+{{- end -}}
+
+{{/* nodeSelector, tolerations und affinity wie beim Deployment (auch für Jobs und Tests) */}}
+{{- define "lego-mosaik.scheduling" -}}
+{{- with .Values.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 {{- end -}}

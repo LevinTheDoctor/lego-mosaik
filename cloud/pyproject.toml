@@ -1,7 +1,7 @@
 [project]
 name = "lego-mosaik-cloud"
 version = "0.1.0"
-description = "Cloud-Variante des LEGO-Mosaik-Service: PostgreSQL, S3 (Garage), Observability"
+description = "Cloud-Variante des LEGO-Mosaik-Service: PostgreSQL, Mosaik-Volume, Observability"
 readme = "README.md"
 authors = [
     { name = "Levin Rüßmann", email = "Levin13c@gmail.com" }
@@ -9,10 +9,8 @@ authors = [
 requires-python = ">=3.15"
 dependencies = [
     "alembic>=1.20.0",
-    "boto3>=1.43.112",
     "lego-mosaik",
     "opentelemetry-exporter-otlp-proto-http>=1.45.1",
-    "opentelemetry-instrumentation-botocore>=0.66b1",
     "opentelemetry-instrumentation-fastapi>=0.66b1",
     "opentelemetry-instrumentation-httpx>=0.66b1",
     "opentelemetry-instrumentation-sqlalchemy>=0.66b1",
@@ -35,8 +33,6 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "boto3-stubs[s3]>=1.43.112",
-    "moto>=5.2.4",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "ruff>=0.17.0",
@@ -53,8 +49,8 @@ files = ["src"]
 untyped_calls_exclude = ["skimage"]
 
 [[tool.mypy.overrides]]
-# boto3 und die OTel-Instrumentierungen bringen (teilweise) keine Typen mit
-module = ["boto3", "boto3.*", "botocore.*", "opentelemetry.instrumentation.*", "moto", "testcontainers.*"]
+# Die OTel-Instrumentierungen bringen (teilweise) keine Typen mit
+module = ["opentelemetry.instrumentation.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

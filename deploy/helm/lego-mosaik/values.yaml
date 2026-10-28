@@ -6,7 +6,9 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-replicaCount: 2
+# Mit einem RWO-Volume (iSCSI) laufen alle Pods auf einem Knoten; mehr als 1 nur
+# zusammen mit einem nodeSelector, sonst bleiben weitere Pods in ContainerCreating hängen
+replicaCount: 1
 
 config:
   logLevel: INFO
@@ -41,6 +43,8 @@ podSecurityContext:
   runAsUser: 10001
   runAsGroup: 10001
   fsGroup: 10001
+  # Rechte des Volumes nur anpassen, wenn sie nicht passen (sonst chown bei jedem Start)
+  fsGroupChangePolicy: OnRootMismatch
   seccompProfile:
     type: RuntimeDefault
 
@@ -75,7 +79,7 @@ resources:
   limits:
     memory: 2Gi
 
-# Mosaike werden in /tmp gerechnet, bevor sie nach S3 gehen
+# /tmp für den Katalog-Import (Rebrickable-Dumps); Mosaike entstehen auf dem Volume
 tmpVolume:
   sizeLimit: 2Gi
 
@@ -119,21 +123,31 @@ catalogImport:
     limits:
       memory: 2Gi
 
-# --- S3 ----------------------------------------------------------------------------------
-s3:
-  bucket: lego-mosaik
-  prefix: mosaike
-  region: garage
-  # Leer + garage.enabled = interner Garage-Service
-  endpoint: ""
-  # Vorhandenes Secret mit accessKeyId und secretAccessKey; leer = erzeugt
-  # (Garage verlangt: ID "GK" + 24 Hex-Zeichen, Secret 64 Hex-Zeichen)
-  existingSecret: ""
-
-garageInit:
-  # Richtet Layout, S3-Key und Bucket in der mitgelieferten Garage ein
-  zone: dc1
-  capacityBytes: 20000000000
+# --- Mosaik-Volume -----------------------------------------------------------------------
+# Bilder und alle erzeugten Dateien der Mosaike; Metadaten liegen in PostgreSQL.
+# Drei Wege zum Volume (in dieser Reihenfolge):
+#   1. existingClaim: eigener PVC, z. B. von einem iSCSI-CSI-Treiber oder selbst angelegt
+#   2. iscsi: Das Chart legt ein statisches PV auf der LUN an und bindet den PVC daran
+#   3. sonst: PVC über storageClass (leer = Standard, bei k3s local-path)
+persistence:
+  existingClaim: ""
+  size: 20Gi
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  mountPath: /var/lib/lego-mosaik
+  annotations: {}
+  # Felder wie beim iSCSI-Volume von Kubernetes (in-tree), werden 1:1 übernommen.
+  # Auf jedem Knoten, der den Pod bekommen kann, muss open-iscsi (iscsiadm) laufen.
+  iscsi: {}
+  #   targetPortal: 192.168.1.10:3260
+  #   iqn: iqn.2005-10.org.freenas.ctl:lego-mosaik
+  #   lun: 0
+  #   fsType: ext4
+  #   # Mit CHAP: Secret (Typ kubernetes.io/iscsi-chap) im Release-Namespace
+  #   chapAuthSession: true
+  #   secretRef:
+  #     name: lego-mosaik-iscsi-chap
+  #     namespace: lego
 
 # --- Datenbank ----------------------------------------------------------------------------
 # Externe Datenbank, wenn postgresql.enabled=false
@@ -149,11 +163,6 @@ postgresql:
   auth:
     username: lego
     database: lego_mosaik
-
-garage:
-  enabled: true
-  replicaCount: 1
-  replicationFactor: 1
 
 nodeSelector: {}
 tolerations: []

@@ -1,5 +1,7 @@
 {{- if .Values.catalogImport.onRelease }}
-# Erster Teilekatalog nach Install/Upgrade (siehe job-garage-init.yaml zum Namen).
+# Erster Teilekatalog nach Install/Upgrade. Kein Helm-Hook: Mit "helm install --wait"
+# liefen post-install-Hooks erst nach der Readiness. Der Name enthält die Revision, weil
+# Jobs unveränderlich sind; ttlSecondsAfterFinished räumt alte Läufe auf.
 # Ist der Katalog noch aktuell, endet der Job sofort.
 apiVersion: batch/v1
 kind: Job

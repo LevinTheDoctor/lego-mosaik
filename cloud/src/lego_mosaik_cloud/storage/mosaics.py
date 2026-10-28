@@ -1,22 +1,24 @@
-"""Fertige Mosaike in S3 (Garage) mit Metadaten in PostgreSQL.
+"""Fertige Mosaike auf einem Volume (z. B. iSCSI-PVC) mit Metadaten in PostgreSQL.
 
-Jede Datei eines Mosaiks liegt als Objekt ``<präfix>/<id>/<datei>`` im Bucket. Die Tabelle
-``mosaike`` hält ``ergebnis.json`` und die Liste aller Objekte; eine Zeile entsteht erst,
-wenn alle Dateien hochgeladen sind. Damit gibt es nie ein halbes Mosaik.
+Jedes Mosaik ist ein Ordner ``<root>/<id>``. Die Tabelle ``mosaike`` hält ``ergebnis.json``
+und die Liste aller Dateien; eine Zeile entsteht erst, wenn der Ordner vollständig an seinem
+Platz liegt. Neue Mosaike entstehen in ``<root>/.tmp`` und werden per ``rename`` übernommen
+(gleiches Dateisystem, also atomar). Damit gibt es nie ein halbes Mosaik.
+
+Das Volume ist ``ReadWriteOnce``: Alle Pods, die es nutzen, laufen auf einem Knoten.
 """
 
 import hashlib
 import json
 import logging
-import mimetypes
+import os
+import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
-from botocore.exceptions import ClientError
 from lego_mosaik.domain.errors import NotFoundError
 from lego_mosaik.outputs.result_json import FILE_NAME as RESULT_FILE
 from lego_mosaik.storage.mosaics import VALID_ID, check_file_name
@@ -25,34 +27,24 @@ from sqlalchemy import Engine, insert, select, update
 
 from lego_mosaik_cloud.db.schema import mosaics
 
-if TYPE_CHECKING:
-    from mypy_boto3_s3 import S3Client
-else:
-    S3Client = Any
-
-__all__ = ["S3Client", "S3MosaicRepository"]
+__all__ = ["VolumeMosaicRepository"]
 
 logger = logging.getLogger(__name__)
 
-CHUNK_BYTES = 1024 * 1024
-MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+TMP_DIR = ".tmp"  # beginnt mit Punkt: nie eine gültige Mosaik-ID
 
 
-class S3MosaicRepository:
+class VolumeMosaicRepository:
     """Erfüllt ``lego_mosaik.storage.protocol.MosaicRepository``.
 
     Args:
         engine: Datenbankverbindung (Tabelle ``mosaike``).
-        s3: boto3-S3-Client (für Garage mit Path-Style-Adressen).
-        bucket: Bucket der Mosaike.
-        prefix: Schlüssel-Präfix, z. B. ``mosaike``.
+        root: Ordner auf dem Volume, z. B. ``/var/lib/lego-mosaik``.
     """
 
-    def __init__(self, engine: Engine, s3: S3Client, bucket: str, prefix: str) -> None:
+    def __init__(self, engine: Engine, root: Path) -> None:
         self._engine = engine
-        self._s3 = s3
-        self._bucket = bucket
-        self._prefix = prefix.strip("/")
+        self.root = root
 
     # --- Lesen ---------------------------------------------------------------------
 
@@ -66,32 +58,25 @@ class S3MosaicRepository:
     def read_bytes(self, mosaic_id: str, file_name: str) -> bytes:
         files, result = self._row(mosaic_id)
         if file_name == RESULT_FILE:
-            return _json_bytes(result)  # aus der Datenbank, spart den Weg zu S3
-        data: bytes = self._get(self._key(mosaic_id, self._known(files, file_name))).read()
-        return data
+            return _json_bytes(result)  # aus der Datenbank, spart den Weg zur Platte
+        return self._path(mosaic_id, self._known(files, file_name)).read_bytes()
 
     def open_file(self, mosaic_id: str, file_name: str) -> StoredFile:
         files, _ = self._row(mosaic_id)
-        key = self._key(mosaic_id, self._known(files, file_name))
-        response = self._get_object(key)
-        body = response["Body"]
-        return StoredFile(
-            file_name, chunks=body.iter_chunks(CHUNK_BYTES), size=response["ContentLength"]
-        )
+        path = self._path(mosaic_id, self._known(files, file_name))
+        return StoredFile(file_name, path=path, size=path.stat().st_size)
 
     # --- Schreiben ------------------------------------------------------------------
 
     @contextmanager
     def new_output_dir(self) -> Iterator[Path]:
-        with tempfile.TemporaryDirectory(prefix="mosaik-") as directory:
-            yield Path(directory)
+        with self._temp_dir() as directory:
+            yield directory
 
     def store(self, target_dir: Path) -> None:
-        """Lädt alle Dateien hoch und legt danach die Zeile in ``mosaike`` an."""
+        """Verschiebt den Ordner nach ``<root>/<id>`` und legt danach die Zeile an."""
         mosaic_id = target_dir.name
         paths = sorted(path for path in target_dir.iterdir() if path.is_file())
-        for path in paths:
-            self._upload(mosaic_id, path)
         result = json.loads((target_dir / RESULT_FILE).read_text(encoding="utf-8"))
         row = {
             "id": mosaic_id,
@@ -102,24 +87,37 @@ class S3MosaicRepository:
             "dateien": [path.name for path in paths],
             "bytes": sum(path.stat().st_size for path in paths),
         }
-        with self._engine.begin() as connection:
-            connection.execute(insert(mosaics).values(row))
+        directory = self.root / mosaic_id
+        if directory.exists():
+            raise FileExistsError(f"Mosaik-Ordner {directory} gibt es schon.")
+        # Die API liest nach store() noch aus target_dir: nicht verschieben, sondern verlinken
+        # (gleiches Dateisystem) bzw. kopieren (z. B. „uebernehmen“ aus ausgabe/)
+        on_volume = target_dir.resolve().is_relative_to((self.root / TMP_DIR).resolve())
+        copy = os.link if on_volume else shutil.copy2
+        with self._temp_dir() as staging:
+            shutil.copytree(target_dir, staging / mosaic_id, copy_function=copy)
+            (staging / mosaic_id).rename(directory)
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(insert(mosaics).values(row))
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
         logger.info("Mosaik %s gespeichert (%d Dateien).", mosaic_id, len(paths))
 
     @contextmanager
     def workspace(self, mosaic_id: str, *, write: bool = False) -> Iterator[Path]:
-        """Lädt die Dateien in einen Temp-Ordner ``<tmp>/<id>``.
+        """Kopiert die Dateien in einen Temp-Ordner ``<root>/.tmp/…/<id>``.
 
         Der Ordnername muss die ID sein: ``MosaicPipeline.edit`` nimmt ihn als ``basis``.
-        Mit ``write=True`` werden danach neue und geänderte Dateien hochgeladen.
+        Mit ``write=True`` werden danach neue und geänderte Dateien übernommen.
         """
         files, _ = self._row(mosaic_id)
-        with tempfile.TemporaryDirectory(prefix="mosaik-") as root:
-            directory = Path(root) / mosaic_id
+        with self._temp_dir() as root:
+            directory = root / mosaic_id
             directory.mkdir()
             for name in files:
-                with self._get(self._key(mosaic_id, name)) as body:
-                    (directory / name).write_bytes(body.read())
+                shutil.copyfile(self._path(mosaic_id, name), directory / name)
             before = _digests(directory)
             yield directory
             if write:
@@ -128,18 +126,27 @@ class S3MosaicRepository:
     def _write_back(self, mosaic_id: str, directory: Path, before: dict[str, str]) -> None:
         after = _digests(directory)
         changed = [name for name, digest in after.items() if before.get(name) != digest]
-        for name in changed:
-            self._upload(mosaic_id, directory / name)
         if not changed:
             return
-        result = json.loads((directory / RESULT_FILE).read_text(encoding="utf-8"))
-        size = sum((directory / name).stat().st_size for name in after)
+        target = self.root / mosaic_id
+        for name in changed:
+            os.replace(directory / name, target / name)  # je Datei atomar
+        result = json.loads((target / RESULT_FILE).read_text(encoding="utf-8"))
+        size = sum((target / name).stat().st_size for name in after)
         values = {"ergebnis": result, "dateien": sorted(after), "bytes": size}
         with self._engine.begin() as connection:
             connection.execute(update(mosaics).where(mosaics.c.id == mosaic_id).values(values))
         logger.info("Mosaik %s aktualisiert: %s.", mosaic_id, ", ".join(changed))
 
     # --- Hilfen ---------------------------------------------------------------------
+
+    @contextmanager
+    def _temp_dir(self) -> Iterator[Path]:
+        """Temp-Ordner auf dem Volume, damit ``rename`` und ``os.replace`` atomar sind."""
+        parent = self.root / TMP_DIR
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="mosaik-", dir=parent) as directory:
+            yield Path(directory)
 
     def _row(self, mosaic_id: str) -> tuple[list[str], dict[str, object]]:
         """Dateiliste und ``ergebnis.json`` (``NotFoundError`` bei unbekannter ID)."""
@@ -157,30 +164,11 @@ class S3MosaicRepository:
             raise NotFoundError(f"Datei „{file_name}“ gibt es nicht.")
         return file_name
 
-    def _key(self, mosaic_id: str, file_name: str) -> str:
-        return f"{self._prefix}/{mosaic_id}/{file_name}"
-
-    def _upload(self, mosaic_id: str, path: Path) -> None:
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        self._s3.upload_file(
-            str(path),
-            self._bucket,
-            self._key(mosaic_id, path.name),
-            ExtraArgs={"ContentType": content_type},
-        )
-
-    def _get_object(self, key: str) -> Any:
-        try:
-            return self._s3.get_object(Bucket=self._bucket, Key=key)
-        except ClientError as error:
-            if str(error.response.get("Error", {}).get("Code")) in MISSING_CODES:
-                raise NotFoundError(
-                    f"Datei „{key.rsplit('/', 1)[-1]}“ fehlt im Speicher."
-                ) from None
-            raise
-
-    def _get(self, key: str) -> Any:
-        return self._get_object(key)["Body"]
+    def _path(self, mosaic_id: str, file_name: str) -> Path:
+        path = self.root / mosaic_id / file_name
+        if not path.is_file():
+            raise NotFoundError(f"Datei „{file_name}“ fehlt im Speicher.")
+        return path
 
 
 def _json_bytes(value: object) -> bytes:

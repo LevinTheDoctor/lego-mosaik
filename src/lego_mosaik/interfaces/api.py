@@ -11,7 +11,7 @@ Authentifizierung. Dateien werden nur ausgeliefert, wenn ihr Name in
 ``ergebnis.json`` steht (Schutz vor Path Traversal).
 
 Speicher: Paletten, Presets und Mosaike kommen über ``ApiBackend``. Ohne Angabe sind es
-die lokalen Dateien; die Cloud-Variante (``lego_mosaik_cloud``) setzt PostgreSQL und S3 ein.
+die lokalen Dateien; die Cloud-Variante (``lego_mosaik_cloud``) setzt PostgreSQL und ein Volume ein.
 """
 
 import asyncio

@@ -8,7 +8,6 @@ Die fachliche Konfiguration (Größe, Verfahren, Ausgaben, …) bleibt ``lego_mo
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,8 +16,7 @@ class CloudSettings(BaseSettings):
 
     Attributes:
         database_url: SQLAlchemy-URL, z. B. ``postgresql+psycopg://user:pw@host:5432/db``.
-        s3_endpoint: S3-Endpunkt von Garage, z. B. ``http://garage:3900``.
-        s3_prefix: Schlüssel-Präfix der Mosaike im Bucket.
+        mosaic_dir: Ordner der Mosaike auf dem Volume, z. B. ``/var/lib/lego-mosaik``.
         data_dir: Ordner mit ``teil_geometrie.csv`` und ``farb_zuordnung.csv`` (für den Import).
         studio_color_file: Optional Studios ``StudioColorDefinition.txt`` (für den Import).
         catalog_refresh_seconds: So oft prüft jeder Pod, ob ein neuer Katalog importiert wurde.
@@ -31,12 +29,7 @@ class CloudSettings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
 
-    s3_endpoint: str = "http://localhost:3900"
-    s3_region: str = "garage"
-    s3_bucket: str = "lego-mosaik"
-    s3_access_key: SecretStr = SecretStr("")
-    s3_secret_key: SecretStr = SecretStr("")
-    s3_prefix: str = "mosaike"
+    mosaic_dir: Path = Path("mosaike")
 
     host: str = "0.0.0.0"  # im Container immer von außen erreichbar
     port: int = 8080

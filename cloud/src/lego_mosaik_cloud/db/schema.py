@@ -102,7 +102,7 @@ price_cache = Table(
     PrimaryKeyConstraint("teil", "farbe", "einstellungen"),
 )
 
-# --- Mosaike (Dateien liegen in S3, hier Metadaten und ergebnis.json) --------------
+# --- Mosaike (Dateien liegen auf dem Volume, hier Metadaten und ergebnis.json) ------
 
 mosaics = Table(
     "mosaike",
@@ -112,7 +112,7 @@ mosaics = Table(
     Column("basis", Text),
     Column("erstellt", DateTime(timezone=True), nullable=False),
     Column("ergebnis", JSONB, nullable=False),
-    Column("dateien", JSONB, nullable=False),  # alle Objekte im Bucket, auch interne
+    Column("dateien", JSONB, nullable=False),  # alle Dateien im Ordner, auch interne
     Column("bytes", BigInteger, nullable=False),
     Index("mosaike_erstellt", "erstellt"),
 )

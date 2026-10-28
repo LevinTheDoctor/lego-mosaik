@@ -12,10 +12,15 @@ spec:
     matchLabels:
       {{- include "lego-mosaik.selectorLabels" . | nindent 6 }}
   strategy:
+    {{- if include "lego-mosaik.singleNodeVolume" . }}
+    # RWO-Volume (z. B. iSCSI): Der neue Pod bekommt es erst, wenn der alte weg ist
+    type: Recreate
+    {{- else }}
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
+    {{- end }}
   template:
     metadata:
       labels:
@@ -90,8 +95,13 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             {{- include "lego-mosaik.volumeMounts" . | nindent 12 }}
+            - name: mosaike
+              mountPath: {{ .Values.persistence.mountPath }}
       volumes:
         {{- include "lego-mosaik.volumes" . | nindent 8 }}
+        - name: mosaike
+          persistentVolumeClaim:
+            claimName: {{ include "lego-mosaik.mosaicClaim" . }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -100,11 +110,12 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.affinity }}
       affinity:
-        {{- with .Values.affinity }}
-        {{- toYaml . | nindent 8 }}
-        {{- else }}
-        # Pods möglichst auf verschiedene Knoten verteilen
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if not (include "lego-mosaik.singleNodeVolume" .) }}
+      affinity:
+        # Pods möglichst auf verschiedene Knoten verteilen (nur ohne RWO-Volume möglich)
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
@@ -113,4 +124,4 @@ spec:
                 labelSelector:
                   matchLabels:
                     {{- include "lego-mosaik.selectorLabels" . | nindent 20 }}
-        {{- end }}
+      {{- end }}

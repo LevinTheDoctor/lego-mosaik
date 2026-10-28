@@ -1,0 +1,56 @@
+{{- if not .Values.persistence.existingClaim }}
+{{- $claim := include "lego-mosaik.mosaicClaim" . }}
+{{- with .Values.persistence.iscsi }}
+{{- if not (and .targetPortal .iqn) }}
+{{- fail "persistence.iscsi braucht mindestens targetPortal und iqn" }}
+{{- end }}
+# Statisches PV auf einer iSCSI-LUN, fest an den PVC unten gebunden. Retain: Die Daten
+# bleiben auch nach "helm uninstall" auf der LUN.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ printf "%s-%s" $.Release.Namespace $claim | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "lego-mosaik.labels" $ | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  capacity:
+    storage: {{ $.Values.persistence.size }}
+  accessModes:
+    {{- toYaml $.Values.persistence.accessModes | nindent 4 }}
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+  claimRef:
+    namespace: {{ $.Release.Namespace }}
+    name: {{ $claim }}
+  iscsi:
+    {{- toYaml . | nindent 4 }}
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  labels:
+    {{- include "lego-mosaik.labels" . | nindent 4 }}
+  annotations:
+    # Bei helm uninstall behalten: Hier liegen alle Mosaike
+    helm.sh/resource-policy: keep
+    {{- with .Values.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+  {{- if .Values.persistence.iscsi }}
+  storageClassName: ""
+  volumeName: {{ printf "%s-%s" .Release.Namespace $claim | trunc 63 | trimSuffix "-" }}
+  {{- else if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}

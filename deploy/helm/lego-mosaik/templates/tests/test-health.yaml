@@ -29,3 +29,4 @@ spec:
           print("ok", ready)
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
+{{- with (include "lego-mosaik.scheduling" . | trim) }}{{ . | nindent 2 }}{{- end }}

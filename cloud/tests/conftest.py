@@ -1,4 +1,4 @@
-"""Fixtures der Cloud-Tests: echtes PostgreSQL (testcontainers), S3 über moto.
+"""Fixtures der Cloud-Tests: echtes PostgreSQL (testcontainers), Mosaike in ``tmp_path``.
 
 Die Fixtures des Kerns (Mini-Katalog, Testbilder, Konfiguration) werden aus
 ``tests/conftest.py`` übernommen, damit Kern und Cloud mit denselben Daten testen.
@@ -10,12 +10,9 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
-import boto3
 import pytest
 from lego_mosaik.config import AppConfig
-from moto import mock_aws
 from prometheus_client import CollectorRegistry
 from sqlalchemy import Engine, create_engine, text
 
@@ -25,7 +22,6 @@ from lego_mosaik_cloud.db.schema import metadata
 from lego_mosaik_cloud.settings import CloudSettings
 
 CORE_TESTS = Path(__file__).resolve().parents[2] / "tests"
-BUCKET = "lego-mosaik-test"
 POSTGRES_IMAGE = "postgres:18-alpine"
 
 
@@ -86,19 +82,10 @@ def db(engine: Engine) -> Engine:
 
 
 @pytest.fixture
-def s3() -> Iterator[Any]:
-    """S3 im Speicher (moto) mit leerem Bucket."""
-    with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1")
-        client.create_bucket(Bucket=BUCKET)
-        yield client
-
-
-@pytest.fixture
 def settings(tmp_path: Path) -> CloudSettings:
     """Einstellungen für Tests; ``teil_geometrie.csv`` schreibt die Fixture ``source_config``."""
     return CloudSettings(
-        s3_bucket=BUCKET,
+        mosaic_dir=tmp_path / "mosaike",
         data_dir=tmp_path,
         catalog_refresh_seconds=0,
         log_format="text",
@@ -106,13 +93,10 @@ def settings(tmp_path: Path) -> CloudSettings:
 
 
 @pytest.fixture
-def services(
-    settings: CloudSettings, db: Engine, s3: Any, pipeline_config: AppConfig
-) -> CloudServices:
-    """Alle Cloud-Bausteine mit Test-DB, moto-S3 und eigener Metrik-Registry."""
-    return build_services(
-        settings, engine=db, s3=s3, registry=CollectorRegistry(), base=pipeline_config
-    )
+def services(settings: CloudSettings, db: Engine, pipeline_config: AppConfig) -> CloudServices:
+    """Alle Cloud-Bausteine mit Test-DB, Mosaik-Ordner und eigener Metrik-Registry."""
+    settings.mosaic_dir.mkdir()
+    return build_services(settings, engine=db, registry=CollectorRegistry(), base=pipeline_config)
 
 
 @pytest.fixture

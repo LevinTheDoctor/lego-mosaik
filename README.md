@@ -20,6 +20,15 @@ Lokaler Service, der aus einem Bild ein **baubares LEGO-Mosaik aus echten Teilen
 
 Bedienung über eine deutsche Kommandozeile (auch interaktiv mit Menü) oder eine lokale HTTP-API. Alle nutzen dieselbe Pipeline.
 
+## Frontend und Repos
+
+| Teil | Repo | Inhalt |
+| --- | --- | --- |
+| Backend | [LevinTheDoctor/lego-mosaik](https://github.com/LevinTheDoctor/lego-mosaik) (dieses Repo) | Pipeline, CLI, HTTP-API; Cloud-Variante mit Helm-Chart (PostgreSQL, Mosaik-Volume z. B. auf iSCSI) |
+| Frontend | [LevinTheDoctor/pic2brick](https://github.com/LevinTheDoctor/pic2brick) | Web-Oberfläche „Pic2Brick“: Foto bearbeiten, Mosaik in 3D, Noppen-Editor, Preise |
+
+Pic2Brick nutzt ausschließlich die [HTTP-API](#http-api). Lokal laufen beide nebeneinander (`uv run lego-mosaik server` hier, `npm run dev` im Frontend). Für den Betrieb auf k3s liegen Frontend-Chart, Werte für beide Charts und die Anleitung im Frontend-Repo, siehe [Deployment auf k3s](#deployment-auf-k3s).
+
 ## Setup
 
 Voraussetzungen: [uv](https://docs.astral.sh/uv/) und Python 3.15. uv lädt Python bei Bedarf selbst.
@@ -481,16 +490,28 @@ journalctl --user -u lego-mosaik-update.service           # Logs
 
 ## Cloud-Variante
 
-Neben der lokalen App gibt es eine Cloud-Variante im selben Repository (uv-Workspace-Paket `cloud/`, Befehl `lego-mosaik-cloud`). Sie nutzt dieselbe Pipeline und dieselbe HTTP-API, speichert aber Bilder und alle erzeugten Dateien in Garage (S3) und Katalog, Paletten, Presets, Preis-Cache und Mosaik-Metadaten in PostgreSQL. Dazu kommen Actuator-Endpunkte wie bei Spring Boot (`/actuator/health`, `/actuator/prometheus`, …), JSON-Logs und OpenTelemetry-Tracing.
+Neben der lokalen App gibt es eine Cloud-Variante im selben Repository (uv-Workspace-Paket `cloud/`, Befehl `lego-mosaik-cloud`). Sie nutzt dieselbe Pipeline und dieselbe HTTP-API, speichert aber Bilder und alle erzeugten Dateien auf einem Volume (z. B. iSCSI-LUN) und Katalog, Paletten, Presets, Preis-Cache und Mosaik-Metadaten in PostgreSQL. Dazu kommen Actuator-Endpunkte wie bei Spring Boot (`/actuator/health`, `/actuator/prometheus`, …), JSON-Logs und OpenTelemetry-Tracing.
 
 ```bash
 uv sync --all-packages                          # Kern + Cloud-Paket
-docker compose up --build -d                    # PostgreSQL, Garage und App lokal
+docker compose up --build -d                    # PostgreSQL und App lokal
 docker compose run --rm app katalog-import      # Teilekatalog laden
-helm install lego deploy/helm/lego-mosaik       # Kubernetes (mit PostgreSQL und Garage)
+helm install lego deploy/helm/lego-mosaik       # Kubernetes (mit PostgreSQL und Mosaik-Volume)
 ```
 
 Details zu Aufbau, Einstellungen, Metriken und Helm-Chart: [`docs/cloud.md`](docs/cloud.md). Die lokale App bleibt davon unberührt.
+
+### Deployment auf k3s
+
+Zusammen mit dem Frontend läuft die Cloud-Variante auf k3s so:
+
+- Release `lego-mosaik` dieses Charts (`deploy/helm/lego-mosaik`) und Release `pic2brick` des Frontend-Charts im selben Namespace.
+- Das Backend bleibt `ClusterIP` ohne Ingress. Die API hat keine Anmeldung und ist deshalb nur über nginx im Frontend erreichbar (`/api/` → `http://lego-mosaik:80/`). nginx begrenzt die Anfragen pro Client-IP und sperrt `/actuator` und `/teile/aktualisieren` nach außen.
+- Von außen erreichbar ist nur das Frontend: über die IP des Servers (Traefik) und über einen Cloudflare Tunnel.
+- BrickLink-Zugangsdaten kommen aus dem Secret `lego-mosaik-bricklink` (`config.extraEnvFrom`); das Datenbank-Passwort erzeugt das Chart. Die Mosaik-Dateien liegen auf einer iSCSI-LUN der Synology (StorageClass `synology-iscsi-storage`).
+- Images: GitHub Actions (`.github/workflows/ci.yml`) baut bei jedem Push `ghcr.io/levinthedoctor/lego-mosaik:sha-<commit>` für amd64 und arm64.
+
+Werte (`deploy/k3s/lego-mosaik.values.yaml`), Deploy-Skript und die vollständige Liste aller Secrets und Einstellungen: [Pic2Brick → `deploy/KONFIGURATION.md`](https://github.com/LevinTheDoctor/pic2brick/blob/main/deploy/KONFIGURATION.md).
 
 ## Architektur
 

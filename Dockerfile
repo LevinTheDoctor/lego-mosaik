@@ -43,11 +43,13 @@ ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     LEGO_MOSAIK_DATA_DIR=/app/daten \
+    LEGO_MOSAIK_MOSAIC_DIR=/var/lib/lego-mosaik \
     LEGO_MOSAIK_GIT_SHA=${GIT_SHA} \
     LEGO_MOSAIK_BUILD_TIME=${BUILD_TIME}
 
 RUN groupadd --system --gid 10001 mosaik \
-    && useradd --system --uid 10001 --gid mosaik --home-dir /app --no-create-home mosaik
+    && useradd --system --uid 10001 --gid mosaik --home-dir /app --no-create-home mosaik \
+    && install -d -o 10001 -g 10001 /var/lib/lego-mosaik
 
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
@@ -60,7 +62,7 @@ LABEL org.opencontainers.image.title="lego-mosaik" \
 
 USER 10001:10001
 EXPOSE 8080
-# Schreibt nur nach /tmp (Mosaike entstehen dort und gehen dann nach S3):
-# readOnlyRootFilesystem funktioniert mit einem emptyDir auf /tmp
+# Schreibt nur nach /tmp und ins Mosaik-Volume unter /var/lib/lego-mosaik:
+# readOnlyRootFilesystem funktioniert mit einem emptyDir auf /tmp und einem PVC
 ENTRYPOINT ["lego-mosaik-cloud"]
 CMD ["server"]

@@ -3,7 +3,7 @@
 | Endpunkt | Zweck |
 |---|---|
 | ``/actuator`` | Links auf alle Endpunkte |
-| ``/actuator/health`` | Gesamtstatus mit Komponenten (``db``, ``s3``, ``katalog``, …) |
+| ``/actuator/health`` | Gesamtstatus mit Komponenten (``db``, ``speicher``, ``katalog``, …) |
 | ``/actuator/health/liveness`` | Prozess lebt (livenessProbe) |
 | ``/actuator/health/readiness`` | Abhängigkeiten erreichbar (readinessProbe) |
 | ``/actuator/info`` | Version, Build, Python, Katalogstand |

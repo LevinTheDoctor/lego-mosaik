@@ -1,6 +1,0 @@
-apiVersion: v2
-name: garage
-description: Garage (S3-kompatibler Objektspeicher) für lego-mosaik
-type: application
-version: 0.1.0
-appVersion: "v2.4.1"
